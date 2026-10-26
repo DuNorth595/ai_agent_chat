@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+.venv-iris/
+venv/
+venv*/
+.python-version-*
+
+# Secrets & runtime config — DO NOT COMMIT
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.crt
+certs/
+
+# Runtime / build artifacts
+*.log
+*.pid
+*.sock
+.tmp/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Backup / legacy
+.backup-*
+*.bak
+*.bak-pre-*
+
+# Scratch files
+s-test*.py
+scratch/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local per-developer
+local/
+personal/
+*.local.*

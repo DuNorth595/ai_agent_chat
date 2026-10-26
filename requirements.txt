@@ -1,0 +1,27 @@
+# agent-voice-ai — runtime dependencies
+# Pin to known-good majors; loosen as upstream stabilizes.
+
+# HTTP / WS server
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# Anthropic SDK (used directly + via fetch)
+# brain.py uses httpx + raw streaming; no SDK required, but listed for reference
+httpx>=0.27
+
+# TTS providers
+# piper_tts.py: invokes the piper CLI (separate install — see README)
+# kokoro_tts.py:
+kokoro>=0.9              # KPipeline
+soundfile>=0.12          # WAV I/O for kokoro
+
+# STT
+# whisper_stt.py talks to a whisper.cpp HTTP server (separate install — see README)
+
+# Misc
+numpy>=1.26
+requests>=2.31
+
+# Optional dev tools
+pytest>=8.0
+pytest-asyncio>=0.23

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- agent-voice-ai bridge - autostart on boot -->
+    <!-- Edit paths to match your install location, then:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent-voice-ai.bridge.plist
+         launchctl kickstart -k gui/$(id -u)/com.agent-voice-ai.bridge
+    -->
+    <key>Label</key>
+    <string>com.agent-voice-ai.bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/yourname/agent-voice-ai/.venv/bin/python</string>
+        <string>/Users/yourname/agent-voice-ai/agent_voice_ai.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/yourname/agent-voice-ai</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>AVA_PORT</key>
+        <string>8770</string>
+        <key>AVA_HOST</key>
+        <string>0.0.0.0</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/agent-voice-ai/bridge.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/agent-voice-ai/bridge.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
