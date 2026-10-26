@@ -106,17 +106,6 @@ SAM_INDEX_PATH = _env_path("MEMORY_INDEX_PATH",
 LONG_TERM_MEMORY_DIR = _env_path("MEMORY_LIFE_DIR",
     _xdg_data() / "life",
     _first_existing(Path.home() / ".config" / "ai_agent_chat" / "memories"))
-# The "what are we working on right now" pointer. Loaded on EVERY turn
-# regardless of query, because the question "what project are we on?"
-# has no keyword overlap with the active work's own vocabulary.
-#
-# Added 2026-10-26: asked the bridge what we were working on, it
-# answered with the MORNING's work because it read the first 200 lines
-# of a 1562-line daily log and never reached the recent entries. The
-# answer was sitting in the right file -- it was just not reachable
-# from the path the bridge took.
-CURRENT_PATH = _env_path("MEMORY_CURRENT_PATH",
-    LONG_TERM_MEMORY_DIR / "SAM" / "CURRENT.md")
 FACT_STORE_DB = _env_path("MEMORY_FACT_STORE_DB",
     _xdg_data() / "facts.db",
     _first_existing(Path.home() / ".config" / "ai_agent_chat" / "fact_store.db"))
@@ -129,9 +118,6 @@ MAX_SOUL_CHARS = 3500
 MAX_INDEX_CHARS = 2500
 MAX_FACTS_CHARS = 2400
 MAX_LIFE_CHARS = 1800
-# The CURRENT pointer is loaded on every turn, so it is capped tighter
-# than the query-matched layers. It is a pointer, not a dump.
-MAX_CURRENT_CHARS = 2200
 
 
 # ---- Read helpers ----
@@ -198,10 +184,110 @@ def _read_fact_store_for_query(query: str, max_chars: int = MAX_FACTS_CHARS) -> 
     return text
 
 
+# Query intents that route to a specific file in the memory tree.
+#
+# Added 2026-10-26. Asked the bridge "what project are we currently
+# working on?" and it answered with an unrelated Sentinel note, because
+# the fallback path scores files by SHARED TOKENS — and "project" and
+# "working" appear in plenty of files that have nothing to do with the
+# active work.
+#
+# The real memory tree already answers this question, in two index
+# files:
+#   SAM/PROJECTS_INDEX.md  -> "What was I working on?" -> Section A
+#   PROJECTS/INDEX.md      -> the live map, grouped A-F by liveness
+#
+# Both are real, existing, maintained files. The problem was never
+# missing information -- it was that nothing ROUTED to them. This table
+# is that routing, expressed as query intent -> file.
+#
+# These are intents, not keywords: the point is to recognise the shape
+# of the question, not to score how many words overlap.
+# Each route is (required_token_group, optional_context_tokens, path).
+#
+# `required` must ALL be present for the route to fire — that is what
+# keeps "what did we do today" from matching the project route (it has
+# no "project"/"working" token) and stops broad words like "live" from
+# dragging in every unrelated file.
+#
+# `context` tokens are OPTIONAL but, when present, must include at
+# least one of them. They stop a route firing on a token that merely
+# appears in passing.
+_LIFE_MEMORY_ROUTES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+    # "what project are we working on / what's active right now"
+    (("project", "working"), ("",),
+     "SAM/PROJECTS_INDEX.md"),
+    (("project", "working"), ("",),
+     "PROJECTS/INDEX.md"),
+    (("working", "on"), ("project", "currently", "right", "now", "today"),
+     "SAM/PROJECTS_INDEX.md"),
+    (("working", "on"), ("project", "currently", "right", "now", "today"),
+     "PROJECTS/INDEX.md"),
+    (("doing",), ("right", "now", "today", "currently", "focus", "currently"),
+     "SAM/PROJECTS_INDEX.md"),
+    (("doing",), ("right", "now", "today", "currently", "focus"),
+     "PROJECTS/INDEX.md"),
+    # "what did we do today / what happened earlier"
+    (("today",), ("did", "do", "we", "happen", "happened", "work", "been"),
+     "DAILY"),
+    (("happened",), ("today", "earlier", "tonight", "yesterday", "recently"),
+     "DAILY"),
+    # "who am i / where do i live / tell me about me"
+    (("who",), ("am", "i", "me", "myself", "about"),
+     "PEOPLE/identity.md"),
+    (("about",), ("me", "myself", "my", "life"),
+     "PEOPLE/identity.md"),
+)
+
+
+def _route_life_memory_files(query: str) -> list[Path]:
+    """Return memory files that directly answer the shape of this query.
+
+    Returns an empty list when no route matches, in which case the
+    caller falls back to token scoring.
+
+    "DAILY" is a directory, not a file -- it resolves to the most
+    recent daily log, because "what did we do today" means the newest
+    entry, not every log ever written.
+    """
+    if not LONG_TERM_MEMORY_DIR.exists():
+        return []
+    q_tokens = set(re.findall(r"[a-z0-9_]+", query.lower()))
+    if not q_tokens:
+        return []
+
+    routed: list[Path] = []
+    for required, context, rel in _LIFE_MEMORY_ROUTES:
+        # ALL required tokens must be present.
+        if not set(required).issubset(q_tokens):
+            continue
+        # If the route declares context tokens, at least one must be
+        # present too. This is what stops "who am i" from matching a
+        # route whose context words do not apply.
+        if context and not (q_tokens & set(context)):
+            continue
+        target = LONG_TERM_MEMORY_DIR / rel
+        if target.is_dir():
+            # A directory route -> the newest daily log inside it.
+            logs = sorted(target.glob("*.md"), reverse=True)
+            if logs:
+                routed.append(logs[0])
+        elif target.is_file():
+            routed.append(target)
+    return routed
+
+
 def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> str:
     """Pull relevant life-memory files for the current query.
 
-    Two strategies, applied in order:
+    Three strategies, applied in order:
+
+    0. **Intent routing** — recognise the SHAPE of the question and go
+       straight to the file that answers it. "What are we working on?"
+       routes to SAM/PROJECTS_INDEX.md, which answers it explicitly.
+       This runs first because token scoring picks the wrong file for
+       meta-questions: "project" and "working" appear in unrelated
+       files, so scoring picks noise.
 
     1. **Keyword index** — if MEMORY_INDEX_PATH is a flat "keyword: path"
        file (the original spec), match by exact keyword. Cheap and explicit.
@@ -219,8 +305,11 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
     out: list[str] = []
     files: list[Path] = []
 
+    # Strategy 0: intent routing to a specific, real memory file.
+    files = _route_life_memory_files(query)
+
     # Strategy 1: keyword index
-    if SAM_INDEX_PATH.exists():
+    if not files and SAM_INDEX_PATH.exists():
         try:
             q_tokens = set(query.lower().split())
             for line in SAM_INDEX_PATH.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -242,7 +331,11 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
         except Exception as e:
             log.warning("memory: keyword index parse failed: %s", e)
 
-    # Strategy 2: recursive token match (only if strategy 1 didn't hit)
+    # Strategy 2: recursive token match (only if strategies 0 and 1
+    # didn't hit). token_set is defined here, so initialise it above
+    # for the identity-boost block below, which runs regardless of
+    # which strategy picked the files.
+    token_set: set[str] = set()
     if not files:
         stop = {
             "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
@@ -285,7 +378,11 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
     identity_keywords = {"birthday", "born", "name", "wife", "kids", "children",
                          "son", "daughter", "family", "address", "phone",
                          "email", "work", "job", "callsign"}
-    if any(tok in identity_keywords for tok in token_set):
+    # `token_set` is only defined by strategy 2. When strategy 0
+    # (intent routing) or strategy 1 (keyword index) already picked
+    # files, this boost must not run against an undefined name.
+    # 2026-10-26: this raised UnboundLocalError on every routed query.
+    if token_set and any(tok in identity_keywords for tok in token_set):
         _id_name = os.environ.get("MEMORY_IDENTITY_FILE", "identity.md").strip()
         _id_names = {_id_name.lower()}
         if "/" in _id_name:
@@ -330,24 +427,36 @@ def build_memory_context(user_text: str) -> str:
     memory, it just won't have identity/context.
     """
     parts: list[str] = []
+
+    # 0. ROUTED MEMORY — FIRST, before anything else.
+    #
+    # 2026-10-26: asked the bridge "what project are we currently
+    # working on?" and it went hunting with 22 tool calls instead of
+    # reading the answer it already had. The routed context WAS in
+    # the prompt — but at char 8528, buried behind 8500 characters of
+    # SOUL.md, the memory index, and the fact store. The model never
+    # reached it.
+    #
+    # Retrieval that answers the question goes FIRST and is labelled
+    # so the model knows it is the answer, not background. Identity
+    # (SOUL) still grounds it, but it no longer buries the answer.
+    routed = _read_life_memory_for_query(user_text)
+    if routed:
+        parts.append(
+            "## RETRIEVED MEMORY — this is the answer for this question. "
+            "Read it before using any tool.\n"
+            + routed + "\n"
+        )
+
     soul = _safe_read(SOUL_PATH, MAX_SOUL_CHARS)
     if soul:
         parts.append(f"## SOUL.md — your identity & voice rules\n{soul}\n")
-    # CURRENT.md — the active work pointer. Always loaded, because
-    # "what are we working on?" does not share vocabulary with the
-    # active work's own words.
-    current = _safe_read(CURRENT_PATH, MAX_CURRENT_CHARS)
-    if current:
-        parts.append(f"## CURRENT — what we are working on right now\n{current}\n")
     index = _safe_read(SAM_INDEX_PATH, MAX_INDEX_CHARS)
     if index:
         parts.append(f"## MEMORY_INDEX.md — your memory index\n{index}\n")
     facts = _read_fact_store_for_query(user_text)
     if facts:
         parts.append(facts + "\n")
-    life = _read_life_memory_for_query(user_text)
-    if life:
-        parts.append(life + "\n")
     return "\n".join(parts).strip()
 
 

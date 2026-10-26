@@ -66,24 +66,54 @@ def test_fact_store_is_reachable():
     check("no FTS error", "facts_fts" not in out)
 
 
-def test_current_pointer_is_loaded():
-    print("\n[test] CURRENT.md is in the system-prompt context on every turn")
+def test_intent_routing_reaches_real_memory():
+    print("\n[test] intent routing reaches the REAL memory files")
     import memory
 
-    check("CURRENT_PATH exists", memory.CURRENT_PATH.exists(),
-          str(memory.CURRENT_PATH))
+    # The bridge must NOT have a parallel memory store. It reads the
+    # same LIFE_MEMORY tree the rest of Sam uses.
+    src = Path(memory.__file__).read_text(encoding="utf-8")
+    check("no CURRENT.md pointer in the bridge",
+          "CURRENT_PATH" not in src and "CURRENT.md" not in src)
 
-    # The query deliberately shares NO vocabulary with the active work.
-    ctx = memory.build_memory_context("what are we doing right now")
-    check("context contains the CURRENT section",
-          "CURRENT" in ctx and "what we are working on right now" in ctx)
-    check("CURRENT names the active project",
-          "ai_agent_chat" in ctx or "voice-bridge" in ctx)
+    hits = memory._route_life_memory_files(
+        "What project are we currently working on?")
+    names = [h.name for h in hits]
+    check("routes to the real projects index",
+          any("PROJECTS_INDEX" in n for n in names), str(names))
 
-    # It must load for an unrelated query too — that was the bug.
-    ctx2 = memory.build_memory_context("what time is it")
-    check("CURRENT loads regardless of query",
-          "what we are working on right now" in ctx2)
+    # It must route to files that actually exist in the real tree.
+    check("every routed file exists",
+          all(h.exists() for h in hits), str(names))
+
+    # "what did we do today" -> the NEWEST daily log, not an old one.
+    daily = memory._route_life_memory_files("what did we do today")
+    check("today routes to a daily log",
+          len(daily) == 1 and daily[0].parent.name == "DAILY",
+          str([h.name for h in daily]))
+
+    # "who am i" -> the identity file, not a random family member.
+    who = memory._route_life_memory_files("who am i")
+    check("who am i routes to justin.md",
+          len(who) == 1 and who[0].name == "justin.md",
+          str([h.name for h in who]))
+
+    # An unrelated question must NOT route anywhere.
+    unrelated = memory._route_life_memory_files("what is the weather")
+    check("unrelated query routes nowhere", unrelated == [],
+          str([h.name for h in unrelated]))
+
+
+def test_retrieved_context_is_the_real_index():
+    print("\n[test] the retrieved context is the real projects index")
+    import memory
+
+    out = memory._read_life_memory_for_query(
+        "What project are we currently working on?")
+    check("context is non-empty", len(out) > 0, f"{len(out)} chars")
+    check("context names the real index file", "PROJECTS_INDEX" in out)
+    check("context does NOT name the unrelated Sentinel note",
+          "DVMFNE" not in out and "systemctl status" not in out)
 
 
 def test_read_file_can_read_the_end():
@@ -157,7 +187,8 @@ def main():
     print("memory retrieval regression test")
     print("=" * 60)
     test_fact_store_is_reachable()
-    test_current_pointer_is_loaded()
+    test_intent_routing_reaches_real_memory()
+    test_retrieved_context_is_the_real_index()
     test_read_file_can_read_the_end()
     test_read_file_handles_bad_args()
     test_daily_log_is_reachable_from_the_end()
