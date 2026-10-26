@@ -73,8 +73,23 @@ async def main():
          "ws audio already played" in page),
         ("fallback used when no WS audio",
          "no ws audio frames" in page),
-        ("counter resets per turn",
-         re.search(r'msg\.state === "thinking"[\s\S]{0,120}_wsAudioFramesReceived = 0',
+        # v0.10.8 — the counter used to reset when the server announced
+        # "thinking". That is NOT a safe reset point in duplex: the
+        # server announces "thinking" for turn N+1 while turn N's audio
+        # is still playing, so the reset wiped the count for the turn in
+        # flight and the next "done" fired the /api/audio fallback on
+        # top of the live audio. The counter now resets at the first
+        # text delta of a reply -- the only unambiguous "a new reply is
+        # beginning". See tests/test_no_double_voice.py.
+        # The character windows are generous on purpose: the handlers
+        # carry long explanatory comments between the anchor and the
+        # statement being checked, and a tight window makes the test
+        # brittle to comment length rather than to behaviour.
+        ("counter resets when a reply starts",
+         re.search(r't === "text"[\s\S]{0,900}_wsAudioFramesReceived = 0',
+                   page) is not None),
+        ("thinking does NOT reset the counter in duplex",
+         re.search(r'msg\.state === "thinking"[\s\S]{0,1200}_mode !== "duplex"',
                    page) is not None),
         ("counter increments on audio frames",
          re.search(r'_wsAudioFramesReceived\+\+', page) is not None),
