@@ -138,6 +138,63 @@ def _read_key_from(path: Path) -> str:
     return ""
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# v0.10.9 — transient provider error handling.
+#
+# MiniMax (the bridge's brain provider) returns HTTP 529 when its
+# server cluster is under load. It is a service-side condition, not a
+# bad request: the same call succeeds seconds later.
+#
+# Hermes' main agent classifies 503/529 as "overloaded" and backs off
+# (hermes-agent/agent/error_classifier.py:1305). The bridge needs the
+# same treatment or a momentary blip becomes a dead turn.
+# ─────────────────────────────────────────────────────────────────────────
+
+# HTTP statuses worth retrying. 429 = rate limited, 5xx = server-side.
+# 529 is MiniMax's "cluster under high load" code.
+BRAIN_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
+
+# 3 retries with exponential backoff: 1s, 2s, 4s (capped at 8s).
+# Total worst-case wait is ~7s, which is inside the voice turn's
+# latency budget -- long enough to ride out a blip, short enough that
+# the user is not left staring at a dead orb.
+BRAIN_MAX_RETRIES = 3
+BRAIN_RETRY_BASE_DELAY = 1.0
+BRAIN_RETRY_MAX_DELAY = 8.0
+
+
+def _is_transient_status(status_code: int | None) -> bool:
+    """True when a status code is worth retrying."""
+    return status_code in BRAIN_RETRY_STATUSES
+
+
+def _friendly_provider_error(status_code: int | None) -> str:
+    """A short, spoken-friendly explanation of a provider failure.
+
+    The old text was "I hit a brain error. Try again in a moment."
+    That is technically true and practically useless -- it does not
+    say whether the problem is temporary or whether asking again
+    would help.
+
+    Keep it SHORT. This string lands in session history, and a long
+    exception string there poisons future turns (the model imitates
+    it verbatim). That is why the original was terse and why these
+    are too.
+    """
+    if status_code == 429:
+        return ("I'm getting rate limited right now. "
+                "Give me a few seconds and ask me again.")
+    if status_code in (503, 529):
+        return ("My provider is overloaded at the moment. "
+                "Try me again in a few seconds.")
+    if status_code in (500, 502, 504):
+        return ("My provider had a server error. "
+                "Try me again in a few seconds.")
+    if status_code in (401, 403):
+        return "My provider rejected my credentials."
+    return "I hit a brain error. Try again in a moment."
+
+
 def get_api_key() -> str:
     """Read BRAIN_API_KEY from the environment, then from an env file.
 
@@ -407,9 +464,76 @@ def stream_reply(
         current_tool_input_buf: list[str] = []
 
         t0 = time.time()
+
+        # v0.10.9 — retry transient provider failures.
+        #
+        # MiniMax returns HTTP 529 ("server cluster under high load")
+        # under real load. The bridge used to give up on the FIRST
+        # such response, so a momentary provider hiccup became "I hit a
+        # brain error." and the user lost the whole answer.
+        #
+        # Hermes' own agent already handles this: it classifies
+        # 503/529 as overloaded and backs off with agent.api_max_retries
+        # (agent/error_classifier.py:1305, agent/turn_recovery.py:1664).
+        # The bridge had no equivalent.
+        #
+        # SAFE ONLY WHILE NO TEXT HAS BEEN YIELDED. Once a text delta
+        # has gone out the user has heard the opening of the answer, and
+        # retrying would speak it twice. The retry wrapper therefore
+        # only covers the request + the response headers; the streaming
+        # loop below runs once and is never re-entered.
+        attempt = 0
+        response = None
+        last_error: Exception | None = None
+        while attempt <= BRAIN_MAX_RETRIES:
+            try:
+                response = requests.post(
+                    API_URL, json=body, headers=headers,
+                    stream=True, timeout=60,
+                )
+                if response.status_code < 400:
+                    break
+                last_error = requests.exceptions.HTTPError(
+                    f"{response.status_code} Server Error for url: {API_URL}",
+                    response=response,
+                )
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as exc:
+                last_error = exc
+
+            if not _is_transient_status(
+                getattr(response, "status_code", None)
+            ) and not isinstance(
+                last_error, (requests.exceptions.ConnectionError,
+                             requests.exceptions.Timeout)
+            ):
+                # Not transient (bad key, malformed request, 4xx) —
+                # retrying will not help.
+                break
+
+            attempt += 1
+            if attempt > BRAIN_MAX_RETRIES:
+                break
+            delay = BRAIN_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            delay = min(delay, BRAIN_RETRY_MAX_DELAY)
+            log.warning(
+                "brain: transient provider error (attempt %d/%d) — retrying in %.1fs: %s",
+                attempt, BRAIN_MAX_RETRIES, delay, last_error,
+            )
+            time.sleep(delay)
+
+        if response is None or response.status_code >= 400:
+            log.error(
+                "brain: API call failed after %d attempt(s): %s",
+                attempt, last_error,
+            )
+            yield {"type": "text", "delta": _friendly_provider_error(
+                getattr(response, "status_code", None))}
+            yield {"type": "done", "stop_reason": "error"}
+            return
+
         try:
-            with requests.post(API_URL, json=body, headers=headers, stream=True, timeout=60) as r:
-                r.raise_for_status()
+            with response as r:
                 for line in r.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
                         continue
