@@ -63,7 +63,19 @@ logging.basicConfig(
 log = logging.getLogger("agent_voice_ai.bridge")
 
 # ---- app ----
-app = FastAPI(title="ai_agent_chat", version="0.10.7")
+# Version + channel live in one place so the HTML header and the
+# /api/health payload can never drift apart.
+#
+# AVA_CHANNEL is "prod" or "dev". The dev instance is identified by
+# its port (8771) and by AVA_CHANNEL; the label is shown next to the
+# version in the top-right of the UI so it is always obvious which
+# build you are talking to.
+APP_VERSION = os.environ.get("AVA_VERSION", "0.10.7")
+APP_CHANNEL = os.environ.get("AVA_CHANNEL", "prod").strip().lower()
+if APP_CHANNEL not in ("prod", "dev"):
+    APP_CHANNEL = "prod"
+
+app = FastAPI(title="ai_agent_chat", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get("AVA_CORS_ORIGINS", "*").split(","),
@@ -384,7 +396,7 @@ HTML = """<!DOCTYPE html>
     <img class="app-logo" src="/static/logo.jpg" alt="Sam logo" width="28" height="28">
     <h1>ai_agent_chat</h1>
     <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></div>
-    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v0.10.7</div>
+    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v__VERSION__ __CHANNEL__</div>
   </div>
 
   <!-- v0.10.1 — unhide button. Deliberately OUTSIDE .chat-shell so that
@@ -1683,8 +1695,20 @@ setState("idle");
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
+    # Stamp the build version and the channel into the header so it is
+    # always obvious which instance you are talking to. "prod" renders
+    # as plain text; "dev" is highlighted, because the dev instance is
+    # the experimental one and should never be mistaken for production.
+    if APP_CHANNEL == "dev":
+        channel_html = (
+            '<span style="color:#f5a623;font-weight:700;letter-spacing:.5px;">'
+            "DEV</span>"
+        )
+    else:
+        channel_html = '<span style="color:#4a5a7a;">prod</span>'
+    html = HTML.replace("__VERSION__", APP_VERSION).replace("__CHANNEL__", channel_html)
     return HTMLResponse(
-        content=HTML,
+        content=html,
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
@@ -2257,6 +2281,9 @@ async def health():
         },
         "tts_chain": f"kokoro ({kokoro_tts._resolve_voice()}) primary, piper fallback",
         "stt": "whisper.cpp on 127.0.0.1:8178",
+        # Which build this is: "prod" or "dev".
+        "channel": APP_CHANNEL,
+        "build": APP_VERSION,
         "telegram_poller": _telegram_poller_status(),
         # v0.10 — barge-in (full-duplex interrupt) status
         "barge_in": {
