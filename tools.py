@@ -152,7 +152,22 @@ def search_files(args: dict) -> dict:
 
 
 def read_file(args: dict) -> dict:
-    """Read a file (truncated to keep prompt sane). Args: path, max_lines (default 200)."""
+    """Read a file (truncated to keep prompt sane).
+
+    Args:
+      path      -- file to read
+      max_lines -- how many lines to return (default 200, max 2000)
+      offset    -- 1-based line to start from
+      tail      -- read the LAST N lines instead of the first N
+
+    `tail` exists because of a real failure (2026-10-26): asked
+    "what project are we working on?", the bridge read the first 200
+    lines of a 1562-line daily log -- the MORNING's work -- and
+    reported that instead of the current thread. The recent work was
+    at the BOTTOM of the file, and there was no way to reach it.
+    `tail` (or `offset`) makes the end of a file reachable in one
+    call.
+    """
     path = args.get("path", "").strip()
     if not path:
         return {"error": "path is required"}
@@ -164,13 +179,52 @@ def read_file(args: dict) -> dict:
         return {"error": f"file not found: {p}"}
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
-        truncated = len(lines) > max_lines
-        if truncated:
-            lines = lines[:max_lines]
+        all_lines = text.splitlines()
+        total = len(all_lines)
+
+        tail = args.get("tail")
+        offset = args.get("offset")
+
+        if tail is not None:
+            # Read the LAST N lines.
+            try:
+                n = max(1, int(tail))
+            except (TypeError, ValueError):
+                return {"error": "tail must be an integer"}
+            start = max(0, total - n)
+            lines = all_lines[start:]
+            truncated = start > 0
+            return {
+                "path": str(p),
+                "total_lines": total,
+                "content": "\n".join(lines),
+                "truncated": truncated,
+                "read_from": "tail",
+                "line_range": f"{start + 1}-{total}",
+            }
+
+        if offset is not None:
+            # Read N lines starting at a 1-based offset.
+            try:
+                start = max(0, int(offset) - 1)
+            except (TypeError, ValueError):
+                return {"error": "offset must be an integer"}
+            lines = all_lines[start:start + max_lines]
+            truncated = (start + max_lines) < total
+            return {
+                "path": str(p),
+                "total_lines": total,
+                "content": "\n".join(lines),
+                "truncated": truncated,
+                "read_from": "offset",
+                "line_range": f"{start + 1}-{start + len(lines)}",
+            }
+
+        truncated = total > max_lines
+        lines = all_lines[:max_lines] if truncated else all_lines
         return {
             "path": str(p),
-            "total_lines": len(text.splitlines()),
+            "total_lines": total,
             "content": "\n".join(lines),
             "truncated": truncated,
         }
@@ -561,7 +615,13 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "description": (
             "Read a file's contents (truncated to keep prompts sane). "
             "Args: path (str, required — absolute path, or relative to $HOME), "
-            "max_lines (int, default 200). Use search_files first to locate the path."
+            "max_lines (int, default 200), "
+            "tail (int — read the LAST N lines instead of the first N), "
+            "offset (int — 1-based line to start from). "
+            "Use search_files first to locate the path. "
+            "IMPORTANT: for a long append-only file (a DAILY log), use "
+            "tail=<N> to read the most RECENT entries — the first N lines "
+            "are the OLDEST work, not the current state."
         ),
     },
     "web_fetch": {
