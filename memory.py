@@ -106,6 +106,17 @@ SAM_INDEX_PATH = _env_path("MEMORY_INDEX_PATH",
 LONG_TERM_MEMORY_DIR = _env_path("MEMORY_LIFE_DIR",
     _xdg_data() / "life",
     _first_existing(Path.home() / ".config" / "ai_agent_chat" / "memories"))
+# The "what are we working on right now" pointer. Loaded on EVERY turn
+# regardless of query, because the question "what project are we on?"
+# has no keyword overlap with the active work's own vocabulary.
+#
+# Added 2026-10-26: asked the bridge what we were working on, it
+# answered with the MORNING's work because it read the first 200 lines
+# of a 1562-line daily log and never reached the recent entries. The
+# answer was sitting in the right file -- it was just not reachable
+# from the path the bridge took.
+CURRENT_PATH = _env_path("MEMORY_CURRENT_PATH",
+    LONG_TERM_MEMORY_DIR / "SAM" / "CURRENT.md")
 FACT_STORE_DB = _env_path("MEMORY_FACT_STORE_DB",
     _xdg_data() / "facts.db",
     _first_existing(Path.home() / ".config" / "ai_agent_chat" / "fact_store.db"))
@@ -118,6 +129,9 @@ MAX_SOUL_CHARS = 3500
 MAX_INDEX_CHARS = 2500
 MAX_FACTS_CHARS = 2400
 MAX_LIFE_CHARS = 1800
+# The CURRENT pointer is loaded on every turn, so it is capped tighter
+# than the query-matched layers. It is a pointer, not a dump.
+MAX_CURRENT_CHARS = 2200
 
 
 # ---- Read helpers ----
@@ -319,6 +333,12 @@ def build_memory_context(user_text: str) -> str:
     soul = _safe_read(SOUL_PATH, MAX_SOUL_CHARS)
     if soul:
         parts.append(f"## SOUL.md — your identity & voice rules\n{soul}\n")
+    # CURRENT.md — the active work pointer. Always loaded, because
+    # "what are we working on?" does not share vocabulary with the
+    # active work's own words.
+    current = _safe_read(CURRENT_PATH, MAX_CURRENT_CHARS)
+    if current:
+        parts.append(f"## CURRENT — what we are working on right now\n{current}\n")
     index = _safe_read(SAM_INDEX_PATH, MAX_INDEX_CHARS)
     if index:
         parts.append(f"## MEMORY_INDEX.md — your memory index\n{index}\n")
