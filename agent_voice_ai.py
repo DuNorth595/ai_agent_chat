@@ -2303,6 +2303,11 @@ def _telegram_poller_status() -> dict:
 # header). It is calibrated from the quiet room BEFORE any TTS starts,
 # so Sam's own voice leaking into the phone mic never trips it.
 
+# Set AVA_DISABLE_TELEGRAM=1 on a secondary/dev instance so it doesn't
+# start a second Telegram poller. Two pollers on one bot token race for
+# the same updates and steal messages from each other.
+TELEGRAM_DISABLED = os.environ.get("AVA_DISABLE_TELEGRAM", "").strip() == "1"
+
 BARGE_IN_ENABLED = os.environ.get("AVA_BARGE_IN", "").strip() == "1"
 # How long the reader keeps waiting for the user to finish after a trip.
 BARGE_CAPTURE_MAX_MS = int(os.environ.get("AVA_BARGE_CAPTURE_MAX_MS", "8000"))
@@ -3607,10 +3612,13 @@ if __name__ == "__main__":
         # Prime Telegram context cache and start the poller so the voice agent
         # has fresh cross-surface context without a manual prompt.
         try:
-            import telegram_sync
-            threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
-            if telegram_sync.start_poller():
-                log.info("telegram_sync: poller started")
+            if TELEGRAM_DISABLED:
+                log.info("telegram_sync: disabled (AVA_DISABLE_TELEGRAM=1)")
+            else:
+                import telegram_sync
+                threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
+                if telegram_sync.start_poller():
+                    log.info("telegram_sync: poller started")
         except Exception as e:
             log.warning("telegram_sync startup failed: %s", e)
         uvicorn.run(
@@ -3632,9 +3640,12 @@ if __name__ == "__main__":
         log.info("open http://localhost:%d/  (or http://localhost:%d/)", PORT, PORT)
         import threading
         try:
-            import telegram_sync
-            threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
-            telegram_sync.start_poller()
+            if TELEGRAM_DISABLED:
+                log.info("telegram_sync: disabled (AVA_DISABLE_TELEGRAM=1)")
+            else:
+                import telegram_sync
+                threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
+                telegram_sync.start_poller()
         except Exception as e:
             log.warning("telegram_sync startup failed: %s", e)
         uvicorn.run(
