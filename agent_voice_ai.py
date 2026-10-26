@@ -50,6 +50,7 @@ except Exception as _kokoro_err:
     KOKORO_SAMPLE_RATE = 24000
     logging.getLogger("agent_voice_ai").warning("kokoro_tts unavailable: %s — fallback chain disabled", _kokoro_err)
 import piper_tts
+import natural_speech
 import whisper_stt
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,7 +64,19 @@ logging.basicConfig(
 log = logging.getLogger("agent_voice_ai.bridge")
 
 # ---- app ----
-app = FastAPI(title="ai_agent_chat", version="0.10.7")
+# Version + channel live in one place so the HTML header and the
+# /api/health payload can never drift apart.
+#
+# AVA_CHANNEL is "prod" or "dev". The dev instance is identified by
+# its port (8771) and by AVA_CHANNEL; the label is shown next to the
+# version in the top-right of the UI so it is always obvious which
+# build you are talking to.
+APP_VERSION = os.environ.get("AVA_VERSION", "0.10.7")
+APP_CHANNEL = os.environ.get("AVA_CHANNEL", "prod").strip().lower()
+if APP_CHANNEL not in ("prod", "dev"):
+    APP_CHANNEL = "prod"
+
+app = FastAPI(title="ai_agent_chat", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.environ.get("AVA_CORS_ORIGINS", "*").split(","),
@@ -80,14 +93,28 @@ def _synth_with_fallback(reply_text: str) -> tuple[bytes, str]:
     Synthesize reply_text → WAV bytes synchronously using the active TTS
     provider chain. Caller must be inside an async handler; we use
     run_in_executor at the call site to keep the event loop responsive.
+
+    Natural-speech path: when AVA_NATURAL_SPEECH=1, each sentence gets
+    a small deterministic speed variation so the reply has rhythm
+    instead of reading every sentence at exactly the same rate. The
+    variation is derived from a hash of the sentence, so the same
+    sentence always sounds the same -- random jitter would read as a
+    glitch rather than as a person.
     """
     tts_provider = os.environ.get("AGENT_VOICE_TTS_PROVIDER", "piper").lower()
-    # Primary: Piper (the default voice-bridge TTS)
+
+    natural = natural_speech.natural_speech_enabled()
+
+    # Primary: Piper (the default voice-bridge TTS).
+    # Piper's `speed` is --length-scale, so it runs the opposite way
+    # from Kokoro's; the helpers keep that straight.
     if tts_provider == "piper" and piper_tts.is_available():
-        return piper_tts.synth_to_wav_bytes(reply_text), "piper"
+        speed = natural_speech.piper_speed(reply_text) if natural else 1.0
+        return piper_tts.synth_to_wav_bytes(reply_text, speed=speed), "piper"
     # Fallback: Kokoro (only if it actually imported)
     if _KOKORO_OK and kokoro_tts is not None:
-        return kokoro_tts.synth_to_wav_bytes(reply_text), "kokoro"
+        speed = natural_speech.kokoro_speed(reply_text) if natural else 1.0
+        return kokoro_tts.synth_to_wav_bytes(reply_text, speed=speed), "kokoro"
     raise RuntimeError("no TTS provider available (piper + kokoro both unavailable)")
 
 
@@ -384,7 +411,7 @@ HTML = """<!DOCTYPE html>
     <img class="app-logo" src="/static/logo.jpg" alt="Sam logo" width="28" height="28">
     <h1>ai_agent_chat</h1>
     <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></div>
-    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v0.10.7</div>
+    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v__VERSION__ __CHANNEL__</div>
   </div>
 
   <!-- v0.10.1 — unhide button. Deliberately OUTSIDE .chat-shell so that
@@ -1005,6 +1032,20 @@ function playAudio(url, btn) {
   }
 }
 document.addEventListener("DOMContentLoaded", () => {
+  // Fetch the server's natural-speech config (inter-sentence gap) so
+  // the client and server agree on one value. Failure is harmless --
+  // the client simply keeps the stock zero-gap behaviour.
+  fetch("/api/health")
+    .then(r => r.json())
+    .then(h => {
+      const ns = h && h.natural_speech;
+      if (ns && typeof ns.gap_ms === "number") {
+        _wsNaturalGap = ns.gap_ms;
+        dbg("natural-speech: gap=" + _wsNaturalGap + "ms enabled=" + ns.enabled);
+      }
+    })
+    .catch(() => { _wsNaturalGap = 0; });
+
   const dbgBtn = document.getElementById("debug-btn");
   const dbgClose = document.getElementById("debug-close");
   const dbgPanel = document.getElementById("debug-panel");
@@ -1331,7 +1372,20 @@ function _wsPlayOne(buffer) {
       _ws.send(JSON.stringify({ type: "playing", value: false }));
     }
     if (_wsSentences.length > 0) {
-      _wsPlayQueue();
+      // Natural-speech gap: a short pause between sentences so the
+      // reply has phrasing rhythm instead of running together. The
+      // gap is applied HERE, between one sentence ending and the next
+      // beginning, because that is the only place the boundary is
+      // actually known -- the server cannot tell whether a sentence
+      // is the last one until the brain stream has already ended, by
+      // which time the audio is long since sent.
+      const gap = _wsNaturalGapMs();
+      if (gap > 0) {
+        setState("speaking");
+        setTimeout(_wsPlayQueue, gap);
+      } else {
+        _wsPlayQueue();
+      }
     } else {
       setState("idle");
     }
@@ -1350,6 +1404,15 @@ function _wsPlayOne(buffer) {
   // so this works inside any async callback.
   src.start();
 }
+
+// Natural-speech inter-sentence gap, in milliseconds. The server
+// advertises the value in /api/health so the client and the server
+// agree on one number. Zero disables the gap (stock behaviour).
+function _wsNaturalGapMs() {
+  if (_wsNaturalGap === null || _wsNaturalGap === undefined) return 0;
+  return _wsNaturalGap;
+}
+let _wsNaturalGap = null;
 
 function _wsPlayQueue() {
   if (_wsPlaying || _wsSentences.length === 0) return;
@@ -1683,8 +1746,20 @@ setState("idle");
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
+    # Stamp the build version and the channel into the header so it is
+    # always obvious which instance you are talking to. "prod" renders
+    # as plain text; "dev" is highlighted, because the dev instance is
+    # the experimental one and should never be mistaken for production.
+    if APP_CHANNEL == "dev":
+        channel_html = (
+            '<span style="color:#f5a623;font-weight:700;letter-spacing:.5px;">'
+            "DEV</span>"
+        )
+    else:
+        channel_html = '<span style="color:#4a5a7a;">prod</span>'
+    html = HTML.replace("__VERSION__", APP_VERSION).replace("__CHANNEL__", channel_html)
     return HTMLResponse(
-        content=HTML,
+        content=html,
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
@@ -2257,6 +2332,19 @@ async def health():
         },
         "tts_chain": f"kokoro ({kokoro_tts._resolve_voice()}) primary, piper fallback",
         "stt": "whisper.cpp on 127.0.0.1:8178",
+        # Which build this is: "prod" or "dev".
+        "channel": APP_CHANNEL,
+        "build": APP_VERSION,
+        # v0.11.0-dev — natural-speech path. The client reads the
+        # inter-sentence gap from here so both sides agree on one
+        # number instead of each hardcoding its own.
+        "natural_speech": {
+            "enabled": natural_speech.natural_speech_enabled(),
+            "gap_ms": natural_speech.INTER_SENTENCE_GAP_MS
+                      if natural_speech.natural_speech_enabled() else 0,
+            "speed_jitter": natural_speech.SPEED_JITTER
+                            if natural_speech.natural_speech_enabled() else 0.0,
+        },
         "telegram_poller": _telegram_poller_status(),
         # v0.10 — barge-in (full-duplex interrupt) status
         "barge_in": {

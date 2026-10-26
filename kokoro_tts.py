@@ -18,6 +18,8 @@ import threading
 import time
 
 import numpy as np
+
+import natural_speech
 import soundfile as sf
 from kokoro import KPipeline
 
@@ -54,11 +56,22 @@ def _get_pipeline():
     return _pipeline
 
 
-def synth_to_wav_bytes(text: str, voice: str | None = None, speed: float = 1.0) -> bytes:
-    """Synthesize text → WAV bytes (24kHz mono PCM). Voice resolved at call time."""
+def synth_to_wav_bytes(text: str, voice: str | None = None, speed: float = 1.0,
+                       natural: bool | None = None) -> bytes:
+    """Synthesize text -> WAV bytes (24kHz mono PCM). Voice resolved at call time.
+
+    When the natural-speech path is enabled, the chunk's leading and
+    trailing silence is trimmed before the WAV is written. Kokoro pads
+    every chunk with roughly 0.35s of silence at the head and 0.45s at
+    the tail; because the bridge synthesizes one sentence at a time,
+    those edges land *between* sentences and make the reply sound
+    padded and robotic. See natural_speech.py for the measurements.
+    """
     voice = _resolve_voice(voice)
     if not text or not text.strip():
         return b""
+    if natural is None:
+        natural = natural_speech.natural_speech_enabled()
     pipeline = _get_pipeline()
     t0 = time.time()
     chunks = []
@@ -68,13 +81,15 @@ def synth_to_wav_bytes(text: str, voice: str | None = None, speed: float = 1.0) 
         log.warning("Kokoro produced no chunks for text: %r", text[:60])
         return b""
     audio_concat = np.concatenate(chunks)
+    if natural:
+        audio_concat = natural_speech.trim_silence(audio_concat, sample_rate=24000)
     buf = io.BytesIO()
     sf.write(buf, audio_concat, 24000, format='WAV', subtype='PCM_16')
     buf.seek(0)
     wav_bytes = buf.read()
     log.info(
-        "tts: %.2fs audio for %d chars in %.2fs (voice=%s)",
-        len(audio_concat) / 24000, len(text), time.time() - t0, voice,
+        "tts: %.2fs audio for %d chars in %.2fs (voice=%s natural=%s)",
+        len(audio_concat) / 24000, len(text), time.time() - t0, voice, bool(natural),
     )
     return wav_bytes
 
