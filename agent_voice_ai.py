@@ -1151,7 +1151,23 @@ function _wsMessageHandler(e) {
     // turn 1's count and skip its fallback even if its WS audio was
     // dropped.
     if (msg.state === "thinking") {
-      _wsAudioFramesReceived = 0;
+      // v0.10.8 — only reset the counter at the START of a turn, and
+      // never in duplex.
+      //
+      // The counter answers "did this turn produce audio?", and the
+      // 'done' message uses it to decide whether the /api/audio
+      // fallback is needed. In duplex the server announces "thinking"
+      // for turn N+1 while turn N's audio is still playing. Resetting
+      // here wiped the count for the turn that was still in flight,
+      // so its 'done' saw zero frames and fired the fallback on top
+      // of the audio that was already playing -- two voices at once.
+      //
+      // In duplex the counter is reset when the reply actually starts
+      // (the first 'text' delta for that turn), which is the only
+      // point that is unambiguously "a new reply is beginning".
+      if (_mode !== "duplex") {
+        _wsAudioFramesReceived = 0;
+      }
     }
     setState(msg.state);
   } else if (t === "transcript") {
@@ -1164,6 +1180,12 @@ function _wsMessageHandler(e) {
     // Stream the reply text into the live DOM element so it appears
     // word-by-word as the brain produces it.
     if (!_wsCurrentReplyEl) {
+      // v0.10.8 — the first text delta of a reply is the unambiguous
+      // start of a new turn. In duplex this is where the per-turn
+      // audio counter is reset, because the server's "thinking"
+      // announcement arrives while the previous turn may still be
+      // playing and is therefore not a safe reset point.
+      _wsAudioFramesReceived = 0;
       const empty = transcript.querySelector(".empty");
       if (empty) empty.remove();
       const turn = document.createElement("div");
@@ -1189,13 +1211,11 @@ function _wsMessageHandler(e) {
     // so Sam stops talking immediately, and show what was cut off.
     dbg("ws barge_in: phase=" + msg.phase + " cut=" +
         (msg.reply_text ? msg.reply_text.length : 0) + " chars");
-    _wsSentences = [];
-    if (_wsActiveSource) {
-      try { _wsActiveSource.stop(); } catch (e) {}
-      _wsActiveSource = null;
-    }
-    const a = _getAudio();
-    try { a.pause(); } catch (e) {}
+    // v0.10.8 — stop every audio source, not just the WebAudio one.
+    // The legacy <audio> fallback and the streamed sentence audio are
+    // separate systems; stopping only one of them is how two voices
+    // ended up talking over each other.
+    _wsStopAllAudio();
     // v0.10.3 — hard-stop the audio context. Sam's voice bleeding into
     // the phone's mic is what makes the captured utterance dirty: the
     // server hears Sam talking over you and can't separate the two.
@@ -1277,12 +1297,12 @@ function _wsMessageHandler(e) {
         // No WS audio arrived — the phone dropped the frames. Use the
         // fallback so the user still hears the reply.
         dbg("ws done: no ws audio frames — using fallback");
-        // Stop any queued sentence audio first
-        _wsSentences = [];
-        if (_wsActiveSource) {
-          try { _wsActiveSource.stop(); } catch (e) {}
-          _wsActiveSource = null;
-        }
+        // v0.10.8 — stop EVERY source before starting the fallback.
+        // The legacy <audio> element may still be playing a previous
+        // turn's fallback, and WebAudio may have a queued sentence.
+        // Starting the fallback on top of either is exactly the
+        // "two voices at once" symptom.
+        _wsStopAllAudio();
         // Use legacy <audio> path — same code as /api/listen reply handler
         const a = _getAudio();
         a.src = msg.audio_url;
@@ -1327,6 +1347,47 @@ async function _wsDecodeSentence(wav_b64) {
   // decodeAudioData expects ArrayBuffer; works for the raw PCM WAV Piper emits.
   return await ctx.decodeAudioData(bytes.buffer);
 }
+
+// v0.10.8 — stop EVERY audio source at once.
+//
+// The bridge drives two independent audio systems: the WebAudio
+// AudioBufferSourceNode (streamed sentence audio) and the legacy
+// <audio> element (the /api/audio fallback). They were stopped
+// independently, so an interrupt could silence one while the other
+// kept playing -- which is what produced the "two of you talking over
+// each other" symptom. Every stop path now goes through here.
+//
+// Also cancels the in-flight decode. _wsPlayQueue() calls
+// _wsDecodeSentence() and only THEN plays; clearing _wsSentences
+// does not cancel a decode that is already awaiting its promise, so
+// the sentence played anyway after the interrupt.
+function _wsStopAllAudio() {
+  // Cancel a decode that is in flight.
+  _wsPlayToken = (_wsPlayToken || 0) + 1;
+
+  // Stop the legacy <audio> element (the fallback player).
+  try {
+    const a = _getAudio();
+    a.pause();
+    a.removeAttribute("src");
+    a.load();
+  } catch (e) { /* ignore */ }
+
+  // Stop the currently-playing WebAudio source.
+  if (_wsActiveSource) {
+    try { _wsActiveSource.stop(); } catch (e) {}
+    try { _wsActiveSource.disconnect(); } catch (e) {}
+    _wsActiveSource = null;
+  }
+
+  // Drop anything queued.
+  _wsSentences = [];
+  _wsPlaying = false;
+}
+
+// Incremented on every stop so an in-flight decode can tell it has
+// been cancelled.
+let _wsPlayToken = 0;
 
 function _wsPlayOne(buffer) {
   const ctx = _ensureAudioCtx();
@@ -1374,9 +1435,20 @@ function _wsPlayQueue() {
     return;
   }
   const wav_b64 = _wsSentences.shift();
+  // Capture the current cancel token. If _wsStopAllAudio() runs while
+  // the decode is awaiting, the token changes and the decoded buffer
+  // is dropped instead of played.
+  const token = _wsPlayToken;
   _wsDecodeSentence(wav_b64)
-    .then(buf => _wsPlayOne(buf))
+    .then(buf => {
+      if (token !== _wsPlayToken) {
+        dbg("audio: decode cancelled (interrupt)");
+        return;
+      }
+      _wsPlayOne(buf);
+    })
     .catch(e => {
+      if (token !== _wsPlayToken) return;   // cancelled -- do not requeue
       dbg("audio: decode failed " + e.name + " — requeuing, need tap-to-unlock");
       _wsSentences.unshift(wav_b64);
       _wsWaitingForGesture = true;
@@ -1416,8 +1488,11 @@ document.addEventListener("pointerdown", _wsGestureUnlock, { passive: true });
 document.addEventListener("touchstart", _wsGestureUnlock, { passive: true });
 
 function _wsReset() {
-  _wsSentences = [];
-  _wsPlaying = false;
+  // v0.10.8 — stop every audio source, including the legacy <audio>
+  // fallback element. _wsReset runs on mode changes and reconnects;
+  // if the fallback was mid-playback it used to keep going and play
+  // over whatever came next.
+  _wsStopAllAudio();
   _wsCurrentReplyEl = null;
   _textDbgFired = false;
   _wsAudioFramesReceived = 0;   // v0.10.1 — new turn, new audio count
@@ -3155,7 +3230,21 @@ async def ws_endpoint(websocket: WebSocket):
                         # audio frames, so this costs one extra synth but
                         # never causes a double-play.
                         duplex_audio_url = None
-                        if reply.strip():
+                        # v0.10.8 — skip the fallback for an INTERRUPTED
+                        # reply. The user cut Sam off; replaying the whole
+                        # reply from the start is wrong, and it is what put
+                        # a second copy of the reply on top of the
+                        # interrupted one. (Observed in the logs:
+                        # "tts: 104.17s audio for 1585 chars" synthesized
+                        # for a reply that was cut after 12 seconds.)
+                        #
+                        # The fallback is only for the case where the
+                        # phone silently dropped the WS frames on an
+                        # UNINTERRUPTED reply.
+                        if reply.strip() and not (
+                            duplex_barge_state is not None
+                            and duplex_barge_state.tripped
+                        ):
                             try:
                                 wav_bytes, _prov = await loop2.run_in_executor(
                                     None, _synth_with_fallback, reply
