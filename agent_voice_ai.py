@@ -358,7 +358,16 @@ HTML = """<!DOCTYPE html>
     background: radial-gradient(circle at 30% 30%, var(--accent), #1e3a8a);
     box-shadow: 0 0 60px var(--accent-glow);
     display: flex; align-items: center; justify-content: center;
-    transition: all 0.3s ease;
+    /* v0.10.8 — transition the COLOURS, not everything.
+       `transition: all` also animates `transform`, which is owned
+       by the pulse/spin keyframes. Every setState() swaps the
+       animation class, and with `all` the browser then animated the
+       transform from the old animation's end state back to
+       identity -- a visible jump on every state change. On iOS
+       that reads as a screen glitch right when you hit Send.
+
+       `transform` belongs to the keyframes alone. */
+    transition: background 0.3s ease, box-shadow 0.3s ease;
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
@@ -454,7 +463,13 @@ HTML = """<!DOCTYPE html>
     padding: 20px;
     overflow-y: auto;
     border-top: 1px solid var(--bg-elev);
-  }
+    /* v0.10.8 — smooth scrolling inside the transcript. The default
+       is an instant jump, and on iOS an instant jump as the content
+       changes size reads as a flash. `auto` keeps it instant for
+       the user-initiated case and smooth for the programmatic one
+       we do on new turns. */
+    scroll-behavior: smooth;
+    }
   .turn { margin-bottom: 16px; }
   .turn .role {
     font-size: 11px; color: var(--text-dim);
@@ -1265,8 +1280,16 @@ function addTurn(role, text) {
     turn.innerHTML = `<div class="role">${label}</div><div class="text"></div>`;
   }
   turn.querySelector(".text").textContent = text;
+  // v0.10.8 — only auto-scroll if the user was already at the
+  // bottom. Yanking the view down when they have scrolled up to
+  // read something is a visible jump, and on mobile with the
+  // keyboard open it reads as a glitch.
+  const wasAtBottom = transcript.scrollHeight - transcript.scrollTop
+                      - transcript.clientHeight < 40;
   transcript.appendChild(turn);
-  transcript.scrollTop = transcript.scrollHeight;
+  if (wasAtBottom) {
+    transcript.scrollTop = transcript.scrollHeight;
+  }
   // wire replay button
   if (role === "sam") {
     const btn = turn.querySelector(".play-btn");
@@ -1522,7 +1545,14 @@ function _wsMessageHandler(e) {
       _wsCurrentReplyEl = turn.querySelector(".text");
     }
     _wsCurrentReplyEl.textContent += msg.text;
-    transcript.scrollTop = transcript.scrollHeight;
+    // v0.10.8 — same "stick to the bottom" rule as addTurn. This
+    // runs on EVERY text delta, so an unconditional scroll here
+    // jitters the view continuously while a reply streams in.
+    const _stick = transcript.scrollHeight - transcript.scrollTop
+                   - transcript.clientHeight < 40;
+    if (_stick) {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
     if (!_textDbgFired) { dbg("ws text: streaming reply, " + (msg.text || "").length + " chars"); _textDbgFired = true; }
   } else if (t === "audio") {
     // Queue sentence audio. _wsPlayQueue() picks the next one and chains.
@@ -2008,6 +2038,11 @@ async function sendText() {
   const text = textInput.value.trim();
   if (!text) return;
   textInput.value = "";
+  // v0.10.8 — dismiss the keyboard. Leaving it up after Send means
+  // the transcript scrolls under it, and the app jumps when it
+  // eventually closes. Blurring first also stops the focus handler
+  // from fighting the layout.
+  try { textInput.blur(); } catch (e) {}
   addTurn("user", text);
   setState("thinking");
   try {
@@ -2030,7 +2065,12 @@ async function sendText() {
       setState("idle");
     }
   } catch (e) {
-    alert("send failed: " + e.message);
+    // v0.10.8 — no alert(). A native alert is a BLOCKING modal: the
+    // page freezes behind it, and on iOS it looks exactly like a
+    // screen glitch. Show the error in the transcript instead, where
+    // it is visible and does not interrupt anything.
+    console.error("send failed:", e);
+    addTurn("sam", "⚠ Could not send that: " + e.message);
     setState("idle");
   }
 }
@@ -2108,7 +2148,12 @@ textInput.addEventListener("keydown", e => { if (e.key === "Enter") { _unlockAud
 // doing that; the visualViewport handler then sizes the app to the
 // shrunken viewport instead.
 textInput.addEventListener("focus", (e) => {
-  try { e.target.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (err) {}
+  // v0.10.8 — NO scrollIntoView here. The transcript is its own
+  // scrolling region, and the page itself cannot scroll, so
+  // scrollIntoView has nothing to do except make Safari scroll the
+  // LAYOUT viewport to reveal the field -- which jolts the whole
+  // fixed-position app. That is the "screen glitches" report.
+  //
   // Safari still scrolls sometimes. Put the document back.
   setTimeout(() => {
     if (window.scrollY !== 0 || document.documentElement.scrollTop !== 0) {
