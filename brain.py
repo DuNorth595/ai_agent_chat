@@ -138,6 +138,7 @@ KEY_ENV_FILES = (
     "./.env",
     "~/.config/ai_agent_chat/.env",
     "~/.hermes/.env",
+    "$AVA_KEY_ENV_FILE",
 )
 
 
@@ -214,13 +215,27 @@ def get_api_key() -> str:
     """Read BRAIN_API_KEY from the environment, then from an env file.
 
     Searched in order: the process environment, then each file in
-    KEY_ENV_FILES. $AVA_ENV_FILE overrides the list entirely.
+    KEY_ENV_FILES.
+
+    $AVA_ENV_FILE, if set, is tried FIRST but does not replace the
+    rest of the list — an operator who points at one env file that
+    lacks a key still gets the conventional locations and
+    $AVA_KEY_ENV_FILE as fallbacks.
     """
     key = os.environ.get("BRAIN_API_KEY") or os.environ.get("MINIMAX_API_KEY")
     if not key:
         override = os.environ.get("AVA_ENV_FILE")
-        candidates = [override] if override else list(KEY_ENV_FILES)
+        candidates = ([override] if override else []) + list(KEY_ENV_FILES)
         for raw in candidates:
+            if not raw:
+                continue
+            # A candidate may be an environment-variable reference
+            # ("$AVA_KEY_ENV_FILE"). Resolve it against the process
+            # environment. An unset variable resolves to "" and the
+            # entry is skipped — os.path.expandvars() would leave the
+            # literal "$VAR" in place, so it is not used here.
+            if raw.startswith("$"):
+                raw = os.environ.get(raw[1:], "")
             if not raw:
                 continue
             path = Path(os.path.expanduser(raw))
