@@ -71,7 +71,7 @@ log = logging.getLogger("agent_voice_ai.bridge")
 # its port (8771) and by AVA_CHANNEL; the label is shown next to the
 # version in the top-right of the UI so it is always obvious which
 # build you are talking to.
-APP_VERSION = os.environ.get("AVA_VERSION", "0.10.7")
+APP_VERSION = os.environ.get("AVA_VERSION", "0.10.8")
 APP_CHANNEL = os.environ.get("AVA_CHANNEL", "prod").strip().lower()
 if APP_CHANNEL not in ("prod", "dev"):
     APP_CHANNEL = "prod"
@@ -166,15 +166,76 @@ HTML = """<!DOCTYPE html>
     color: var(--text);
     font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     height: 100%; overflow: hidden;
+    /* v0.10.8 — the page must not scroll, ever. On iOS the on-screen
+       keyboard does not resize the layout viewport; it shrinks the
+       VISUAL viewport and Safari scrolls the document up to reveal
+       the focused field. That scroll is what moved the PTT/Duplex
+       toggle off the top of the screen. `position: fixed` on the
+       body pins the whole layout to the viewport, so the keyboard
+       can only shrink it, never scroll it away. */
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    overscroll-behavior: none;
   }
+  /* v0.10.8 — body is a GRID with three explicit rows:
+       row 1  .header      (auto — its natural height)
+       row 2  .stage       (1fr  — the orb area, takes the leftover)
+       row 3  .chat-shell  (minmax — the conversation + input)
+
+     Why grid and not flex: with `html{overflow:hidden}` and a flex
+     column, every row's height had to be negotiated from flex-basis
+     guesses. Three attempts each moved the problem rather than
+     fixing it (the orb collapsed to 0px; the transcript grew to
+     y=7870 in a 633px viewport; the input row sat 96px below the
+     fold). A grid with named rows and an explicit minmax on the
+     shell makes the budget deterministic:
+
+       - the stage gets 1fr of the leftover and can NEVER push the
+         shell out of the viewport;
+       - the shell gets minmax(0, 1fr), so it can shrink to zero but
+         never grows past the row it was given;
+       - the transcript scrolls INSIDE that box, so a 500-turn
+         conversation changes nothing about the layout.
+
+     `min-height: 0` on the grid items is what lets them shrink
+     below their content size — the single most-missed flex/grid
+     rule, and the cause of this bug. */
   body {
-    display: flex; flex-direction: column;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, auto);
+    /* v0.10.8 — --app-height is set by the visualViewport handler so
+       the app is sized to the VISIBLE area. It falls back to 100%
+       when the handler has not run (or on a browser with no
+       visualViewport). */
+    height: var(--app-height, 100%);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)
   }
   .header {
     display: flex; align-items: center; gap: 12px;
     padding: 16px 20px;
     border-bottom: 1px solid var(--bg-elev);
+  }
+  /* v0.10.8 — the debug log button sits in the header's top-right
+     corner, so the input row below holds only conversation
+     controls. margin-left:auto pushes it right; the version stamp
+     sits next to it. */
+  .header .header-btn {
+    margin-left: auto;
+    padding: 5px 9px;
+    font-size: 13px;
+    line-height: 1;
+    border-radius: 6px;
+    flex: 0 0 auto;
+  }
+  /* v0.10.8 — on a narrow phone the header has to give up something:
+     the app title and the version stamp are the first things to go,
+     because the debug button and the chat-bubble restore control
+     must stay reachable. */
+  @media (max-width: 380px) {
+    .header { padding: 12px 12px; gap: 8px; }
+    .header h1 { font-size: 15px; }
+    .header .version { display: none; }
   }
   .header h1 {
     margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.05em;
@@ -198,15 +259,79 @@ HTML = """<!DOCTYPE html>
     margin-right: 6px;
     vertical-align: middle;
   }
+  /* v0.10.8 — the stage must SHRINK, not just grow.
+     .stage was `flex: 1` with the default `min-height: auto`, so it
+     refused to shrink below its content (the 200px orb + label).
+     Once the transcript grew, the column overflowed the viewport:
+     body scrollHeight was 800px in a 633px viewport, and html is
+     `overflow: hidden`, so the .controls row (holding the text
+     input) was clipped off the bottom with NO WAY TO SCROLL TO IT.
+     Justin's symptom: "after a few back and forth conversations, the
+     text box where I can type into disappears."
+
+     min-height:0 lets the stage shrink; the orb scales down inside
+     it so the orb never gets pushed off either. */
   .stage {
-    flex: 1;
+    /* v0.10.8 — fills its grid row (1fr) and lets the orb scale
+       down inside it. min-height:0 lets it shrink. overflow:hidden
+       stops the orb bleeding into the conversation area.
+
+       --orb-size is the SINGLE source of the orb's diameter. The
+       orb sets BOTH width and height from it, so the shape stays a
+       perfect circle at every size. Sizing the orb from a
+       percentage of the stage in each axis independently is what
+       turned it into an ellipse.
+
+       v0.10.8 — justify-content: flex-start, NOT center. The
+       stage holds the PTT/Duplex toggle at the top and the orb
+       below it. With `center`, when the stage row shrinks (the iOS
+       keyboard opening shrinks the visual viewport), the content
+       overflows in BOTH directions and the toggle is pushed ABOVE
+       the top of the screen — the user reported "the whole screen
+       shifts up and hides the PTT/duplex button so you can't
+       switch". Anchoring to the top means the toggle stays put and
+       the ORB is what gives way. */
+    --orb-size: 200px;
+    min-height: 0;
     display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
+    align-items: center; justify-content: flex-start;
     padding: 20px;
     position: relative;
+    overflow: hidden;
+  }
+  /* v0.10.8 — the toggle is the one thing in the stage that must
+     NEVER be scrolled off. It gets its own row, above the orb, and
+     is never allowed to shrink or be clipped. */
+  .mode-toggle {
+    flex: 0 0 auto;
+    position: relative;
+    z-index: 2;
+  }
+  /* v0.10.8 — on a short screen the orb gives up size rather than
+     pushing the conversation area and the input row out of the
+     viewport. clamp() keeps it between a usable minimum and the
+     full 200px. */
+  @media (max-height: 700px) {
+    .stage { --orb-size: 150px; }
+  }
+  @media (max-height: 580px) {
+    .stage { --orb-size: 120px; }
   }
   .orb {
-    width: 200px; height: 200px;
+    /* v0.10.8 — the orb must stay a CIRCLE. The first attempt used
+       `width: min(200px, 100%); height: min(200px, 100%)`, but the
+       two 100%s resolve against different axes (the stage's width
+       and its height), so the orb became a tall ellipse and the
+       border-radius made it look like a distorted, spinning shape.
+
+       The fix: give the orb a square box and let a single custom
+       property scale it. `width` and `height` stay in sync, so
+       border-radius:50% is always a true circle. The stage sets
+       --orb-size below. */
+    width: var(--orb-size, 200px);
+    height: var(--orb-size, 200px);
+    aspect-ratio: 1 / 1;
+    flex: 0 0 auto;
     border-radius: 50%;
     background: radial-gradient(circle at 30% 30%, var(--accent), #1e3a8a);
     box-shadow: 0 0 60px var(--accent-glow);
@@ -289,11 +414,23 @@ HTML = """<!DOCTYPE html>
     letter-spacing: 0.1em;
     text-transform: uppercase;
   }
+  /* v0.10.8 — the transcript is the ONLY scrolling region, so the
+     controls row below it is always on screen. min-height:0 lets it
+     shrink inside the flex column; without it a flex item refuses to
+     shrink below its content height and the input row gets pushed
+     off the bottom of a viewport that cannot scroll (html is
+     overflow:hidden). */
   .transcript {
-    flex: 0 0 auto;
+    /* v0.10.8 — the ONLY scrolling region. min-height:0 lets it
+       shrink inside the shell's column flex; overflow-y:auto makes
+       a long conversation scroll INSIDE the box instead of growing
+       the box. `flex: 0 1 auto` + an explicit max-height means the
+       transcript takes what it needs up to the cap and no more. */
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 34vh;
     padding: 20px;
     overflow-y: auto;
-    max-height: 40vh;
     border-top: 1px solid var(--bg-elev);
   }
   .turn { margin-bottom: 16px; }
@@ -308,11 +445,48 @@ HTML = """<!DOCTYPE html>
   /* v0.10: a reply the user interrupted mid-sentence */
   .turn.sam.interrupted .text { opacity: 0.55; }
   .turn.sam.interrupted .role::after { content: " — interrupted"; color: #fbbf24; }
+  /* v0.10.8 — no paused turn style. There is no Pause button; see
+     the note where the client-side pause code used to live. */
   .empty { color: var(--text-dim); text-align: center; padding: 20px; font-style: italic; }
   .controls {
-    padding: 16px 20px;
+    padding: 12px 14px;
     border-top: 1px solid var(--bg-elev);
-    display: flex; gap: 12px; align-items: center;
+    display: flex; gap: 8px; align-items: center;
+    /* v0.10.8 — never let the input row be squeezed out of existence */
+    flex: 0 0 auto;
+  }
+  /* v0.10.8 — the input is the only thing that may shrink. The
+     buttons keep their natural size, and `min-width: 0` on the input
+     lets it actually shrink below its intrinsic width instead of
+     pushing the row wider than the screen. Without min-width:0 a
+     flex item refuses to shrink under its content size, which is
+     what pushed the right-hand buttons off the edge. */
+  .controls input[type="text"] {
+    /* v0.10.8 — the input is the ONLY thing that may shrink, and it
+       must be allowed to shrink all the way. A flex item's default
+       `min-width:auto` refuses to go below its content's intrinsic
+       size, which for a text input is its `size` attribute (20
+       chars ≈ 200px). That floor is what pushed the row to 356px on
+       a 320px iPhone SE and put the clear button out of reach.
+       min-width:0 removes it; the input then gives up space until
+       the row fits. */
+    min-width: 0;
+    flex: 1 1 0;
+    width: 0;
+  }
+  .controls button { flex: 0 0 auto; }
+  /* Send is the primary action — it keeps the accent. The others
+     are icon-sized so the row fits a 320px phone. */
+  #send-btn { padding: 12px 16px; }
+  #clear-btn { padding: 12px 13px; font-size: 16px; }
+  /* v0.10.8 — a 320px phone (iPhone SE 1st gen) still has room for
+     the full row: input + Send + clear. The buttons that
+     used to overflow it (the debug log and audio test) now live in
+     the header, so the text label on Send stays readable. */
+  @media (max-width: 360px) {
+    .controls { padding: 10px 10px; gap: 6px; }
+    #send-btn { padding: 11px 13px; }
+    #clear-btn { padding: 11px 10px; }
   }
   button {
     background: var(--accent);
@@ -344,7 +518,51 @@ HTML = """<!DOCTYPE html>
   .mic-pulse.active { display: inline-block; animation: pulse 1s ease-in-out infinite; }
 
   /* v0.9 hide-chat */
-  .chat-shell { position: relative; }
+  /* v0.10.8 — the input row must stay reachable.
+     html is `height:100%; overflow:hidden` and body is a flex COLUMN.
+     .chat-shell is a flex item with no min-height, so once the
+     transcript grew (it caps at 40vh) plus the orb stage (flex:1),
+     the shell's total height exceeded the viewport and .controls —
+     the row holding the text input — was clipped off the bottom with
+     no way to scroll to it. Symptom: "after a few back and forth
+     conversations, the text box where I can type into disappears."
+
+     Fix: let the shell shrink (min-height:0) and let the TRANSCRIPT
+     be the only scrolling region. The controls row is pinned and
+     always visible. `flex: 0 0 auto` on .controls stops it being
+     squeezed to zero. */
+  /* v0.10.8 — the input row must ALWAYS be reachable.
+     The chain of failures, in order:
+       1. html is `height:100%; overflow:hidden` — the page cannot
+          scroll, so anything below the fold is simply gone.
+       2. body is a flex COLUMN; .stage was `flex:1` with the
+          default `min-height:auto`, so it refused to shrink below
+          its 200px orb and pushed the shell down.
+       3. .chat-shell then sized to its CONTENT, and the transcript
+          had no height cap, so the shell grew to the full length of
+          the conversation. The .controls row landed at y=7870 in a
+          633px viewport.
+
+     The fix is an explicit height budget, not a percentage:
+     - .stage     : flex-basis 0, min-height 0, so it takes only the
+                    space the shell does not need.
+     - .chat-shell: flex 1 1 0 + min-height 0, so it fills the
+                    remaining space and NEVER grows past it.
+     - .transcript: the only scrolling region (overflow-y:auto),
+                    min-height 0 so it can shrink.
+     - .controls  : flex 0 0 auto, never squeezed out.
+
+     The conversation scrolls INSIDE .transcript. The input row stays
+     pinned to the bottom of the viewport, forever. */
+  .chat-shell {
+    /* v0.10.8 — the third grid row. minmax(0, auto) lets it size to
+       the controls plus a bounded transcript, and never past the
+       space the grid gives it. */
+    position: relative;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .chat-bar { display: flex; justify-content: flex-end; align-items: center; margin: 0 0 6px 0; }
   .hide-btn {
     background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
@@ -412,6 +630,11 @@ HTML = """<!DOCTYPE html>
     <h1>ai_agent_chat</h1>
     <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></div>
     <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v__VERSION__ __CHANNEL__</div>
+    <!-- v0.10.8 — the debug log button moved to the header's top right.
+         It used to live in the input row with the conversation
+         controls, where six items needed 546px on a 393px iPhone and
+         the right-hand buttons were pushed off the edge. -->
+    <button class="secondary header-btn" id="debug-btn" title="View debug log" aria-label="View debug log">🪲</button>
   </div>
 
   <!-- v0.10.1 — unhide button. Deliberately OUTSIDE .chat-shell so that
@@ -445,12 +668,10 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div class="controls">
-      <input type="text" id="text-input" placeholder="message sam..." autocomplete="off">
+      <input type="text" id="text-input" placeholder="message agent..." autocomplete="off">
       <button id="send-btn">Send</button>
       <button class="secondary" id="clear-btn" title="Clear conversation">×</button>
-    <button class="secondary" id="debug-btn" title="View debug log">🪲</button>
-    <button class="secondary" id="audio-test-btn" title="Test audio output (plays a 440Hz tone)">🔊</button>
-  </div>
+    </div>
   <div id="debug-panel" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:2000;padding:20px;overflow:auto;font-family:monospace;font-size:12px;color:#a7f3d0;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
       <strong>ai_agent_chat debug log</strong>
@@ -526,6 +747,25 @@ document.addEventListener("keydown", (e) => {
   }
 });
 const sendBtn = document.getElementById("send-btn");
+// v0.10.8 — there is no Pause button.
+//
+// It was built, then removed at Justin's direction. Two lessons are
+// worth keeping, because both are the kind of thing that gets
+// "fixed" back in by a later change:
+//
+//   1. A Pause button that aborts the brain is a STOP, not a pause.
+//      Aborting threw the rest of the reply away, so there was
+//      nothing to resume -- which is why the first version "didn't
+//      do anything". A real pause has to stop the PLAYBACK while the
+//      server keeps GENERATING.
+//
+//   2. The client already has everything a pause needs: _wsSentences
+//      is a queue of pending audio, and _wsPlayQueue() drains it.
+//      A pause would be: stop the audible source, keep the queue,
+//      refuse to drain until resumed.
+//
+// The barge-in path is the answer to "stop Sam now" -- you talk over
+// him and he stops. No extra button is needed for that.
 const clearBtn = document.getElementById("clear-btn");
 
 // ── v0.10 duplex mode ──────────────────────────────────────────────
@@ -774,7 +1014,7 @@ async function _duplexStart() {
     stageEl.classList.add("duplex");
     setState("listening");
     orbLabel.textContent = "listening — just talk";
-    duplexHint.innerHTML = "Mic is <b>live</b>. Talk any time — you can interrupt Sam mid-sentence.";
+    duplexHint.innerHTML = "Mic is <b>live</b>. Talk any time — you can interrupt the agent mid-sentence.";
   } catch (e) {
     showHint("Duplex mic failed: " + e.message + ". Falling back to push-to-talk.");
     _setMode("ptt");
@@ -886,6 +1126,48 @@ function _setMode(m) {
   try { localStorage.setItem("ava-mode", _mode); } catch (e) { /* ignore */ }
 }
 
+// v0.10.8 — keep the layout sized to the VISUAL viewport.
+//
+// On iOS the on-screen keyboard shrinks the visual viewport but NOT
+// the layout viewport, and Safari scrolls the document to reveal the
+// focused input. That scroll moved the PTT/Duplex toggle off the top
+// of the screen, so the user could not switch modes: "After two or
+// three chats, the whole screen shifts up and hides the PTT/duplex
+// button so you can't switch. That whole top section shouldn't move."
+//
+// The fix has two halves:
+//   1. CSS: body is position:fixed, so the document cannot scroll.
+//   2. JS: size the app to visualViewport.height, so the top section
+//      stays put and the conversation area gives up the space the
+//      keyboard took.
+//
+// The mode toggle is at the TOP of the stage, so as the viewport
+// shrinks it is the part that must NOT move.
+(function _setupVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+
+  function apply() {
+    // The visible height, minus nothing — safe-area padding is
+    // already handled by env() in the body rule.
+    const h = Math.round(vv.height);
+    document.documentElement.style.setProperty("--app-height", h + "px");
+    document.body.style.height = h + "px";
+    // The keyboard moved the layout viewport up by an offset. Push
+    // the document back so the top of the app stays at the top.
+    if (vv.offsetTop > 0) {
+      window.scrollTo(0, vv.offsetTop);
+    }
+  }
+
+  apply();
+  vv.addEventListener("resize", apply);
+  vv.addEventListener("scroll", apply);
+  window.addEventListener("orientationchange", () => {
+    setTimeout(apply, 250);
+  });
+})();
+
 function setState(s) {
   state = s;
   orb.className = "orb";
@@ -928,7 +1210,11 @@ function addTurn(role, text) {
   if (empty) empty.remove();
   const turn = document.createElement("div");
   turn.className = "turn " + role;
-  const label = role === "user" ? "you" : (role === "sam" ? "sam" : role);
+  // v0.10.8 — the transcript says "agent", not "sam". The repo is
+  // shared, so the UI should not name a particular person. The
+  // internal role key stays "sam" -- it is the CSS class, the server
+  // message field, and the API contract.
+  const label = role === "user" ? "you" : (role === "sam" ? "agent" : role);
   const replyId = "reply-" + Math.random().toString(36).slice(2, 10);
   if (role === "sam") {
     turn.innerHTML = `<div class="role">${label}</div><div class="text" id="${replyId}"></div><button class="play-btn" data-target="${replyId}" style="margin-top:6px;background:#374151;color:#a7f3d0;border:none;padding:4px 10px;border-radius:6px;font-size:12px;display:none;">▶ replay</button>`;
@@ -1049,39 +1335,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const dbgBtn = document.getElementById("debug-btn");
   const dbgClose = document.getElementById("debug-close");
   const dbgPanel = document.getElementById("debug-panel");
-  const audioTestBtn = document.getElementById("audio-test-btn");
   if (dbgBtn) dbgBtn.onclick = () => { dbgPanel.style.display = "block"; dbg("debug panel opened"); };
   if (dbgClose) dbgClose.onclick = () => { dbgPanel.style.display = "none"; };
-  if (audioTestBtn) audioTestBtn.onclick = () => {
-    _unlockAudio();
-    // 440Hz tone, 0.4s, generated as a data: WAV so no network needed.
-    const sr = 22050, dur = 0.4, freq = 440;
-    const n = Math.floor(sr * dur);
-    const buf = new ArrayBuffer(44 + n * 2);
-    const v = new DataView(buf);
-    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
-    ws(0, "RIFF"); v.setUint32(4, 36+n*2, true); ws(8, "WAVE");
-    ws(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-    v.setUint16(22, 1, true); v.setUint32(24, sr, true); v.setUint32(28, sr*2, true);
-    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
-    ws(36, "data"); v.setUint32(40, n*2, true);
-    for (let i = 0; i < n; i++) {
-      // 5ms attack/release envelope to avoid clicks
-      let env = 1;
-      if (i < sr*0.01) env = i/(sr*0.01);
-      else if (i > n - sr*0.05) env = (n-i)/(sr*0.05);
-      v.setInt16(44 + i*2, Math.sin(2*Math.PI*freq*i/sr) * env * 16000, true);
-    }
-    // Convert to base64 data URL
-    const bytes = new Uint8Array(buf);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    const dataUrl = "data:audio/wav;base64," + btoa(bin);
-    const a = _getAudio();
-    a.src = dataUrl;
-    a.play().then(() => dbg("audioTest: played 440Hz chime"))
-             .catch(e => dbg("audioTest: FAILED " + e.name + ": " + e.message));
-  };
   dbg("page loaded; ua=" + navigator.userAgent.slice(0, 80));
 });
 
@@ -1219,7 +1474,7 @@ function _wsMessageHandler(e) {
       if (empty) empty.remove();
       const turn = document.createElement("div");
       turn.className = "turn sam";
-      turn.innerHTML = `<div class="role">sam</div><div class="text"></div>`;
+      turn.innerHTML = `<div class="role">agent</div><div class="text"></div>`;
       transcript.appendChild(turn);
       _wsCurrentReplyEl = turn.querySelector(".text");
     }
@@ -1804,6 +2059,26 @@ try {
 } catch (e) { /* ignore */ }
 sendBtn.addEventListener("click", () => { _unlockAudio(); sendText(); });
 textInput.addEventListener("keydown", e => { if (e.key === "Enter") { _unlockAudio(); sendText(); } });
+// v0.10.8 — focusing the text field must not scroll the page. iOS
+// scrolls the document to reveal the focused input, which moved the
+// PTT/Duplex toggle off the top. preventScroll stops the browser
+// doing that; the visualViewport handler then sizes the app to the
+// shrunken viewport instead.
+textInput.addEventListener("focus", (e) => {
+  try { e.target.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (err) {}
+  // Safari still scrolls sometimes. Put the document back.
+  setTimeout(() => {
+    if (window.scrollY !== 0 || document.documentElement.scrollTop !== 0) {
+      window.scrollTo(0, 0);
+      if (document.documentElement.scrollTop !== 0) {
+        document.documentElement.scrollTop = 0;
+      }
+      if (document.body.scrollTop !== 0) {
+        document.body.scrollTop = 0;
+      }
+    }
+  }, 60);
+});
 clearBtn.addEventListener("click", async () => {
   await fetch("/api/clear", {
     method: "POST",
@@ -2039,6 +2314,10 @@ async def _stream_brain_to_sentences(
         # reply dead. Checked at the TOP of every poll so we bail within
         # ~10ms of the trip, and again before each sentence ships so we
         # don't speak a sentence the user already interrupted.
+        # The brain aborts on a barge-in trip -- that is the user
+        # talking over Sam. There is no separate Pause path: a pause
+        # button that aborts the brain is a STOP, and a stop that
+        # discards the rest of the reply cannot be resumed.
         if barge_state is not None and barge_state.tripped and not aborted:
             aborted = True
             log.info(
@@ -3569,7 +3848,7 @@ async def ws_endpoint(websocket: WebSocket):
                 full = await _stream_brain_to_sentences(
                     user_text, sid, on_sentence, barge_state=barge_state,
                 )
-
+  
                 # v0.10 — if the user interrupted, capture the rest of what
                 # they said and run it as the next turn. This is the duplex
                 # loop: interrupt → keep talking → Sam answers.
