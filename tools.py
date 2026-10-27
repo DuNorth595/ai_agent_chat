@@ -621,7 +621,11 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
             "Use search_files first to locate the path. "
             "IMPORTANT: for a long append-only file (a DAILY log), use "
             "tail=<N> to read the most RECENT entries — the first N lines "
-            "are the OLDEST work, not the current state."
+            "are the OLDEST work, not the current state. "
+            "NEVER page through a long file with successive offset= calls "
+            "to find recent content: that is what burned 20-31 tool "
+            "calls on a single question. If the memory context already "
+            "contains the file's recent entries, read them there."
         ),
     },
     "web_fetch": {
