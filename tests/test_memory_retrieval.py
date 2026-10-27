@@ -2,19 +2,17 @@
 # SPDX-License-Identifier: MIT
 """Regression test for the bridge's memory retrieval.
 
-Justin, 2026-10-26: asked the dev bridge *"what project are we
-currently working on?"* and it answered with the MORNING's work
-(Sentinel / meds reminder) instead of tonight's voice-bridge work.
+Asked the dev bridge *"what project are we currently working on?"*
+and it answered with the MORNING's work instead of tonight's
+voice-bridge work.
 
 Three independent defects, all silent:
 
 1. **The fact store pointed at the wrong database.** The bridge was
-   configured for `~/.hermes/memories/fact_store.db` — a 0-byte file
-   from July 27 — while the real store (290 facts) lives at
-   `~/.hermes/memory_store.db`. Every turn logged
-   `fact_store FTS query failed: no such table: facts_fts`, and the
-   fact store silently contributed NOTHING to any answer. 189
-   occurrences in prod, 31 in dev.
+   configured for a stale 0-byte file while the real store lives at
+   the path in `MEMORY_FACT_STORE_DB`. Every turn logged a fact-store
+   FTS error, and the fact store silently contributed NOTHING to any
+   answer.
 
 2. **`read_file` could only read the TOP of a file.** The daily log
    was 1562 lines; the bridge read the first 200 (the morning's work)
@@ -22,14 +20,17 @@ Three independent defects, all silent:
    no `tail` and no `offset`.
 
 3. **The "current project" answer was two levels deep and not on the
-   cold-start path.** `SAM/PROJECTS_INDEX.md` answers the question
-   explicitly ("What was I working on?" → Section A, live/active) but
-   the bridge never opened it — it searched for "current project" and
-   "ACTIVE" and landed on the wrong files.
+   cold-start path.** The project index answers the question
+   explicitly, but the bridge never opened it — it searched for
+   "current project" and "ACTIVE" and landed on the wrong files.
 
 The fix: point at the real fact store, give `read_file` a `tail`,
-and add a `SAM/CURRENT.md` pointer that is injected into the system
+and add a `CURRENT.md` pointer that is injected into the system
 prompt on every turn.
+
+This test exercises the bridge against an operator's own memory tree.
+When no fact store or memory tree is configured, it SKIPS rather than
+fails — a fresh clone has neither, and that is not a defect.
 
 Run:
     env -u PYTHONPATH .venv-iris/bin/python tests/test_memory_retrieval.py
@@ -55,6 +56,10 @@ def test_fact_store_is_reachable():
     print("\n[test] the fact store actually resolves and returns facts")
     import memory
 
+    if not memory.FACT_STORE_DB.exists():
+        print("  SKIP  no fact store configured "
+              "(set MEMORY_FACT_STORE_DB to run this test)")
+        return
     check("FACT_STORE_DB exists", memory.FACT_STORE_DB.exists(),
           str(memory.FACT_STORE_DB))
     check("FACT_STORE_DB is not the 0-byte stub",
@@ -164,12 +169,30 @@ def test_read_file_handles_bad_args():
     tmp.unlink(missing_ok=True)
 
 
+def _newest_daily_log():
+    """The newest daily log in the configured memory tree, if any.
+
+    The path comes from the bridge's own configuration, so the test
+    works on any operator's setup instead of one hardcoded filename.
+    """
+    import memory
+
+    root = getattr(memory, "MEMORY_ROOT", None)
+    if root is None:
+        return None
+    daily_dir = Path(root) / "DAILY"
+    if not daily_dir.is_dir():
+        return None
+    logs = sorted(daily_dir.glob("*.md"))
+    return logs[-1] if logs else None
+
+
 def test_daily_log_is_reachable_from_the_end():
     print("\n[test] the real daily log's recent work is reachable")
     import tools
 
-    daily = Path.home() / "Desktop" / "LIFE_MEMORY" / "DAILY" / "2026-10-26.md"
-    if not daily.exists():
+    daily = _newest_daily_log()
+    if daily is None:
         print("  SKIP  daily log not present")
         return
 
