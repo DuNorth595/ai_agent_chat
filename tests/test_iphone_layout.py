@@ -252,26 +252,55 @@ def main():
                 "deviceScaleFactor": 2, "mobile": True,
             })
             await sess("Page.reload", {"ignoreCache": True})
-            await asyncio.sleep(1.2)
+            # The balance check above left the page on another
+            # viewport; reload and let it settle before measuring,
+            # or the "before" snapshot comes back empty.
+            await asyncio.sleep(2.0)
 
+            before_expr = """
+            (() => {
+              try {
+                const t = document.getElementById('mode-toggle');
+                if (!t) return JSON.stringify({error: 'no mode-toggle'});
+                const b = t.getBoundingClientRect();
+                return JSON.stringify({
+                  top: Math.round(b.top),
+                  visible: b.top >= -1
+                           && b.bottom <= window.innerHeight + 1,
+                  scrollY: window.scrollY,
+                  docScrollTop: document.documentElement.scrollTop,
+                  bodyScrollTop: document.body.scrollTop,
+                  vh: window.innerHeight,
+                  ready: document.readyState,
+                });
+              } catch (e) {
+                return JSON.stringify({error: String(e)});
+              }
+            })()
+            """
             before = await sess("Runtime.evaluate", {
-                "expression": """
-                (() => {
-                  const t = document.getElementById('mode-toggle');
-                  const b = t.getBoundingClientRect();
-                  return JSON.stringify({
-                    top: Math.round(b.top),
-                    visible: b.top >= -1 && b.bottom <= window.innerHeight + 1,
-                    scrollY: window.scrollY,
-                    docScrollTop: document.documentElement.scrollTop,
-                    bodyScrollTop: document.body.scrollTop,
-                    vh: window.innerHeight,
-                  });
-                })()
-                """,
-                "returnByValue": True,
+                "expression": before_expr, "returnByValue": True,
             })
-            b = json.loads(before.get("result", {}).get("value") or "{}")
+            raw = before.get("result", {}).get("value")
+            if not raw:
+                # A reload can leave Runtime.evaluate in a stale
+                # execution context. Reload and try once more.
+                await sess("Page.reload", {"ignoreCache": True})
+                await asyncio.sleep(1.5)
+                before = await sess("Runtime.evaluate", {
+                    "expression": before_expr, "returnByValue": True,
+                })
+                raw = before.get("result", {}).get("value")
+                if not raw:
+                    print("        before-snapshot failed: "
+                          + json.dumps(before)[:180])
+            if not raw:
+                print("        RAW before-response: "
+                      + json.dumps(before)[:300])
+            kb_before = json.loads(raw or "{}")
+            if kb_before.get("error"):
+                print("        before-snapshot error: "
+                      + str(kb_before.get("error")))
 
             # Simulate the keyboard the way iOS ACTUALLY does it.
             #
@@ -334,6 +363,152 @@ def main():
                 "returnByValue": True,
             })
             await asyncio.sleep(0.6)
+
+            # ── the balance check ──
+            # The conversation area now takes a fixed 45vh, so the
+            # stage gets the rest. The orb must still be a sensible
+            # size, and the transcript must have room to show text.
+            for w, h, label in WIDTHS:
+                await sess("Emulation.setDeviceMetricsOverride", {
+                    "width": w, "height": h,
+                    "deviceScaleFactor": 2, "mobile": True,
+                })
+                await sess("Page.reload", {"ignoreCache": True})
+                await asyncio.sleep(0.8)
+                bal = await sess("Runtime.evaluate", {
+                    "expression": """
+                    (() => {
+                      const orb = document.querySelector('.orb')
+                        .getBoundingClientRect();
+                      const tr = document.getElementById('transcript')
+                        .getBoundingClientRect();
+                      const inp = document.getElementById('text-input')
+                        .getBoundingClientRect();
+                      return JSON.stringify({
+                        orb: Math.round(orb.height),
+                        tr: Math.round(tr.height),
+                        inpW: Math.round(inp.width),
+                      });
+                    })()
+                    """,
+                    "returnByValue": True,
+                })
+                bal_data = json.loads(
+                    bal.get("result", {}).get("value") or "{}")
+                bal_ok = (bal_data.get("orb", 0) >= 100
+                          and bal_data.get("tr", 0) >= 80
+                          and bal_data.get("inpW", 0) >= 100)
+                if not bal_ok:
+                    failures += 1
+                print(f"        {w:>4}px {label:<22} "
+                      f"orb={bal_data.get('orb'):>3} "
+                      f"transcript={bal_data.get('tr'):>3} "
+                      f"input={bal_data.get('inpW'):>3}  "
+                      f"{'OK ' if bal_ok else 'BAD'}")
+
+            # ── the "shakes up and down after I hit send" check ──
+            # Send does two things that change the layout:
+            #   1. addTurn() adds a turn -- the shell row is
+            #      `minmax(0, auto)`, so it GROWS, the stage row
+            #      (1fr) shrinks, and everything above the transcript
+            #      moves up.
+            #   2. setState("thinking") changes the orb-label text
+            #      from "tap to talk" to "thinking...".
+            #
+            # The top of the screen must NOT move. Measure the
+            # toggle's top and the header's bottom before and after
+            # a simulated send.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(1.2)
+
+            async def snapshot():
+                r = await sess("Runtime.evaluate", {
+                    "expression": """
+                    (() => {
+                      const t = document.getElementById('mode-toggle');
+                      const h = document.querySelector('.header');
+                      const st = document.getElementById('stage');
+                      const lbl = document.getElementById('orb-label');
+                      const tr = document.getElementById('transcript');
+                      return JSON.stringify({
+                        toggleTop: Math.round(t.getBoundingClientRect().top),
+                        headerH: Math.round(h.getBoundingClientRect().height),
+                        stageH: Math.round(st.getBoundingClientRect().height),
+                        labelH: Math.round(lbl.getBoundingClientRect().height),
+                        labelText: (lbl.textContent || '').trim(),
+                        shellH: Math.round(document.getElementById('chat-shell')
+                                            .getBoundingClientRect().height),
+                        trH: Math.round(tr.getBoundingClientRect().height),
+                      });
+                    })()
+                    """,
+                    "returnByValue": True,
+                })
+                return json.loads(r.get("result", {}).get("value") or "{}")
+
+            before_snap = await snapshot()
+
+            # Simulate exactly what the Send button does.
+            await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const tr = document.getElementById('transcript');
+                  const empty = tr.querySelector('.empty');
+                  if (empty) empty.remove();
+                  const turn = document.createElement('div');
+                  turn.className = 'turn user';
+                  turn.innerHTML = '<div class="role">you</div>'
+                    + '<div class="text">a test message that was typed</div>';
+                  tr.appendChild(turn);
+                  const orb = document.querySelector('.orb');
+                  const lbl = document.getElementById('orb-label');
+                  lbl.textContent = 'thinking...';
+                  orb.className = 'orb thinking';
+                  return 'ok';
+                })()
+                """,
+                "returnByValue": True,
+            })
+            await asyncio.sleep(0.4)
+
+            after_snap = await snapshot()
+
+            toggle_moved = abs(after_snap.get("toggleTop", 0)
+                               - before_snap.get("toggleTop", 0))
+            label_changed = (after_snap.get("labelH", 0)
+                             != before_snap.get("labelH", 0))
+            # The STAGE must not change height either. The orb is
+            # anchored to the stage's top, so a stage that grows or
+            # shrinks by even a few pixels moves the orb -- and that
+            # is the "shakes up and down" report.
+            stage_moved = abs(after_snap.get("stageH", 0)
+                              - before_snap.get("stageH", 0))
+            no_shake = (toggle_moved == 0 and stage_moved == 0
+                        and not label_changed)
+
+            if not no_shake:
+                failures += 1
+            print(f"        before: toggleTop={before_snap.get('toggleTop')} "
+                  f"stageH={before_snap.get('stageH')} "
+                  f"labelH={before_snap.get('labelH')} "
+                  f"shellH={before_snap.get('shellH')}")
+            print(f"        after:  toggleTop={after_snap.get('toggleTop')} "
+                  f"stageH={after_snap.get('stageH')} "
+                  f"labelH={after_snap.get('labelH')} "
+                  f"shellH={after_snap.get('shellH')}")
+            print(f"        the top of the screen does not move: "
+                  f"{'OK ' if no_shake else 'BAD'} "
+                  f"(toggle moved {toggle_moved}px, stage moved "
+                  f"{stage_moved}px, label height changed={label_changed})")
+            if label_changed:
+                print(f"        NOTE: the orb-label height changed "
+                      f"({before_snap.get('labelH')} -> "
+                      f"{after_snap.get('labelH')}) -- that alone can "
+                      f"move the stage contents")
 
             # ── the "glitch when I click send" check ──
             # The orb's `transition: all 0.3s ease` animates EVERY
@@ -470,15 +645,18 @@ def main():
                      and a.get("top", -999) >= 0
                      and a.get("scrollY", 1) == 0
                      and a.get("bodyPosition") == "fixed"
-                     and abs(a.get("top", 0) - b.get("top", 0)) <= 2
+                     and abs(a.get("top", 0)
+                             - kb_before.get("top", 0)) <= 2
                      # the input must be ABOVE the keyboard, not under it
                      and a.get("input_visible") is True
                      and a.get("input_bottom", 99999)
                          <= a.get("visibleH", 0) + 1)
             if not kb_ok:
                 failures += 1
-            print(f"        before: top={b.get('top')} visible={b.get('visible')} "
-                  f"scrollY={b.get('scrollY')} vh={b.get('vh')}")
+            print(f"        before: top={kb_before.get('top')} "
+                  f"visible={kb_before.get('visible')} "
+                  f"scrollY={kb_before.get('scrollY')} "
+                  f"vh={kb_before.get('vh')}")
             print(f"        after:  top={a.get('top')} visible={a.get('visible')} "
                   f"scrollY={a.get('scrollY')} body={a.get('bodyPosition')} "
                   f"h={a.get('bodyHeight')} top={a.get('bodyTop')} vh={a.get('vh')}")
