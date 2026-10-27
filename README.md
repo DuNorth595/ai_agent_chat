@@ -1,5 +1,9 @@
 # ai_agent_chat
 
+<p align="center">
+  <img src="docs/social-preview.jpg" alt="ai_agent_chat — social preview" width="600">
+</p>
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688.svg)](https://fastapi.tiangolo.com/)
