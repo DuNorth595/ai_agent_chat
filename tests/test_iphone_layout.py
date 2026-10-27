@@ -364,6 +364,249 @@ def main():
             })
             await asyncio.sleep(0.6)
 
+            # ── the REAL send, watched frame by frame ──
+            # Three rounds of fixes have failed. Each of them
+            # measured the layout at ONE point, before and after.
+            # The shake is a TRANSIENT -- it happens in between.
+            #
+            # So: type into the real input, click the real Send
+            # button, and sample every animation frame through the
+            # whole turn. Anything that moves is the shake.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(2.0)
+
+            watcher = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const ids = {
+                    header: '.header',
+                    toggle: '#mode-toggle',
+                    stage: '#stage',
+                    orb: '#orb',
+                    shell: '#chat-shell',
+                    transcript: '#transcript',
+                    controls: '.controls',
+                  };
+                  const snap = () => {
+                    const o = {};
+                    for (const k in ids) {
+                      const e = document.querySelector(ids[k]);
+                      if (!e) { o[k] = null; continue; }
+                      const b = e.getBoundingClientRect();
+                      o[k] = [Math.round(b.top), Math.round(b.height)];
+                    }
+                    // Every header child, by height -- the header is a
+                    // flex row, so one taller child makes the whole
+                    // header taller and pushes everything below it
+                    // down.
+                    const hdr = document.querySelector('.header');
+                    o.kids = [...hdr.children].map(c => {
+                      const b = c.getBoundingClientRect();
+                      return (c.id || c.className || c.tagName) + ':'
+                             + Math.round(b.height);
+                    }).join(',');
+                    // The status text is what changes on send.
+                    o.status = (document.getElementById('status-text')
+                      || {}).textContent;
+                    // Is the text on the SAME line as the dot? If the
+                    // dot is inline-block and the text wraps, the
+                    // div is two line-boxes tall.
+                    const stEl = document.querySelector('.status');
+                    if (stEl) {
+                      o.stH = Math.round(stEl.getBoundingClientRect().height);
+                      o.stScroll = stEl.scrollHeight;
+                      const dot = stEl.querySelector('.dot');
+                      const txt = document.getElementById('status-text');
+                      if (dot && txt) {
+                        const db = dot.getBoundingClientRect();
+                        const tb = txt.getBoundingClientRect();
+                        o.sameLine = Math.abs(db.top - tb.top) < 4;
+                        o.dotTop = Math.round(db.top);
+                        o.txtTop = Math.round(tb.top);
+                        o.txtW = Math.round(tb.width);
+                        o.stW = Math.round(stEl.getBoundingClientRect().width);
+                      }
+                    }
+                    const st = document.querySelector('.status');
+                    o.statusW = st
+                      ? Math.round(st.getBoundingClientRect().width) : -1;
+                    o.scrollY = Math.round(window.scrollY);
+                    o.vvH = window.visualViewport
+                      ? Math.round(window.visualViewport.height) : -1;
+                    o.vvTop = window.visualViewport
+                      ? Math.round(window.visualViewport.offsetTop) : -1;
+                    o.bodyH = Math.round(
+                      document.body.getBoundingClientRect().height);
+                    o.htmlH = Math.round(
+                      document.documentElement.getBoundingClientRect().height);
+                    o.innerH = window.innerHeight;
+                    return o;
+                  };
+                  window.__snaps = [snap()];
+                  window.__watching = true;
+                  const tick = () => {
+                    if (!window.__watching) return;
+                    window.__snaps.push(snap());
+                    requestAnimationFrame(tick);
+                  };
+                  requestAnimationFrame(tick);
+                  return 'watching';
+                })()
+                """,
+                "returnByValue": True,
+            })
+
+            # Type into the real input and click the real button.
+            await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const inp = document.getElementById('text-input');
+                  inp.focus();
+                  inp.value = 'this is a test message to trigger the send';
+                  return 'typed';
+                })()
+                """,
+                "returnByValue": True,
+            })
+            await asyncio.sleep(0.4)
+            await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  document.getElementById('send-btn').click();
+                  return 'clicked';
+                })()
+                """,
+                "returnByValue": True,
+            })
+            # Wait for the reply to actually arrive rather than a
+            # fixed delay -- the status text changes when the server
+            # responds, and on a slow brain that can take a while.
+            deadline_send = time.time() + 45
+            while time.time() < deadline_send:
+                await asyncio.sleep(0.5)
+                done_check = await sess("Runtime.evaluate", {
+                    "expression": """
+                    (() => {
+                      const t = document.querySelectorAll('.turn.sam');
+                      return t.length;
+                    })()
+                    """,
+                    "returnByValue": True,
+                })
+                n = done_check.get("result", {}).get("value")
+                if isinstance(n, int) and n > 0:
+                    break
+            await asyncio.sleep(1.0)
+
+            # Stop watching and pull the frames.
+            frames = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  window.__watching = false;
+                  return JSON.stringify(window.__snaps || []);
+                })()
+                """,
+                "returnByValue": True,
+            })
+            fr = json.loads(frames.get("result", {}).get("value") or "[]")
+            print(f"        captured {len(fr)} animation frames")
+
+            # Diff consecutive frames and report every element that
+            # moved.
+            MOVED = {}
+            for i in range(1, len(fr)):
+                for k in fr[i]:
+                    if fr[i - 1].get(k) != fr[i].get(k):
+                        MOVED.setdefault(k, 0)
+                        MOVED[k] += 1
+            for k, n in sorted(MOVED.items(), key=lambda x: -x[1]):
+                first = fr[0].get(k)
+                last = fr[-1].get(k)
+                print(f"        MOVED {k}: {n} frames, "
+                      f"{first} -> {last}")
+
+            # The header children's heights, frame by frame, plus the
+            # status text that changes on send.
+            print("        the status text and the header's children's "
+                  "heights, frame by frame:")
+            prev = None
+            for i, f in enumerate(fr):
+                key = (f.get("status"), f.get("statusW"), f.get("kids"))
+                if key != prev:
+                    print(f"          frame {i:>3}: status="
+                          f"{f.get('status')!r} w={f.get('statusW')} "
+                          f"stH={f.get('stH')} scrollH={f.get('stScroll')} "
+                          f"dotTop={f.get('dotTop')} txtTop={f.get('txtTop')} "
+                          f"txtW={f.get('txtW')} sameLine={f.get('sameLine')}")
+                    print(f"                    kids=[{f.get('kids')}]")
+                    prev = key
+                # The start and end are the SAME -- the element went
+                # somewhere and came back. That is the shake, and a
+                # start/end comparison cannot see it. Print every
+                # distinct value it took.
+                seen = []
+                for f in fr:
+                    v = f.get(k)
+                    if not seen or seen[-1] != v:
+                        seen.append(v)
+                print(f"          path: {seen}")
+
+            # Which HEADER CHILD grows? The header is a flex row; if
+            # one of its children gets taller, the whole header does,
+            # and everything below it moves down with it.
+            kid = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const h = document.querySelector('.header');
+                  const out = [];
+                  for (const c of h.children) {
+                    const b = c.getBoundingClientRect();
+                    out.push({
+                      tag: c.tagName + (c.id ? '#' + c.id : ''),
+                      cls: c.className,
+                      h: Math.round(b.height),
+                      w: Math.round(b.width),
+                      top: Math.round(b.top),
+                    });
+                  }
+                  return JSON.stringify(out);
+                })()
+                """,
+                "returnByValue": True,
+            })
+            kids = json.loads(kid.get("result", {}).get("value") or "[]")
+            print("        header children NOW:")
+            for kd in kids:
+                print(f"          {kd['tag']:<18} cls={str(kd['cls'])[:16]:<16} "
+                      f"h={kd['h']:>3} w={kd['w']:>4} top={kd['top']}")
+            if not MOVED:
+                print("        nothing moved")
+
+            # The verdict on the real send: NOTHING may move.
+            # The header is the first grid row, so if it grows, every
+            # row below it moves down -- that is the shake.
+            shake = {}
+            for k in ("header", "toggle", "stage", "orb", "shell",
+                      "transcript", "controls"):
+                vals = [f.get(k) for f in fr if f.get(k) is not None]
+                if not vals:
+                    continue
+                tops = {v[0] for v in vals}
+                heights = {v[1] for v in vals}
+                if len(tops) > 1 or len(heights) > 1:
+                    shake[k] = (sorted(tops), sorted(heights))
+            if shake:
+                failures += 1
+                for k, (tops, heights) in shake.items():
+                    print(f"        SHAKE: {k} moved -- "
+                          f"tops={tops} heights={heights}")
+            else:
+                print("        NOTHING MOVED during a real send")
+
             # ── the balance check ──
             # The conversation area now takes a fixed 45vh, so the
             # stage gets the rest. The orb must still be a sensible
