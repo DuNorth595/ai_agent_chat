@@ -164,14 +164,36 @@ def test_no_regression_guards():
     print("\n── the trap that keeps biting ──")
     src = get_source()
 
-    # The transcript must never be able to size the shell by its
-    # content. A `flex: 1 1 auto` transcript with no min-height:0 is
-    # the exact original bug.
+    # The GRID ROW is the guard, not the transcript's flex value.
+    #
+    # The transcript used to be `flex: 0 1 auto` with no height cap,
+    # and the shell row was `minmax(0, auto)` -- CONTENT-SIZED. Adding
+    # a turn grew the shell, the 1fr stage row shrank, and the orb
+    # (anchored to the stage's top) jumped. That is the "shakes up and
+    # down after I hit send" bug.
+    #
+    # Now the shell row is a FIXED share of the height, and the
+    # transcript fills it and scrolls inside. So the transcript SHOULD
+    # be `flex: 1 1 auto` -- what matters is that the row above it
+    # cannot grow.
+    body = css_block(src, "body", at_line_start=True)
+    check("the shell row has a FIXED height share (not content-sized)",
+          "45vh" in body or "vh" in body.split("grid-template-rows")[-1][:120],
+          body.split("grid-template-rows")[-1][:120])
+    # Only the THIRD row matters. The first row is the header, which
+    # is correctly `auto` -- it is as tall as it needs to be.
+    rows = body.split("grid-template-rows")[-1].split(";")[0]
+    third = rows.split()[-1] if rows.split() else ""
+    check("the shell row is NOT content-sized (that is the shake)",
+          "auto" not in third, f"third row is {third!r}")
+
     transcript = css_block(src, ".transcript")
-    check("transcript does not use flex:1 1 auto (the original bug)",
-          "flex: 1 1 auto" not in transcript, transcript[:140])
-    check("transcript does not use flex:0 0 auto (would grow to content)",
-          "flex: 0 0 auto" not in transcript, transcript[:140])
+    check("the transcript fills the fixed shell (flex: 1 1 auto)",
+          "flex: 1 1 auto" in transcript, transcript[:140])
+    check("the transcript can shrink (min-height: 0)",
+          "min-height: 0" in transcript, transcript[:140])
+    check("the transcript scrolls internally",
+          "overflow-y: auto" in transcript, transcript[:140])
 
 
 if __name__ == "__main__":

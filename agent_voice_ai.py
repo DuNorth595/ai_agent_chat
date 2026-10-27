@@ -220,7 +220,21 @@ HTML = """<!DOCTYPE html>
      rule, and the cause of this bug. */
   body {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, auto);
+    /* v0.10.8 — the conversation area gets a FIXED share of the
+       height, and the transcript scrolls inside it.
+
+       The third row used to be `minmax(0, auto)` — CONTENT-SIZED.
+       That is the "shakes up and down after I hit send" bug: when
+       a turn was added, the shell row grew by a few pixels, the
+       1fr stage row shrank to compensate, and the orb -- which is
+       anchored to the top of the stage -- jumped. The user saw the
+       whole screen twitch every time they sent a message.
+
+       A fixed `minmax(0, 45vh)` share means the stage and the
+       conversation area keep the same sizes no matter how long the
+       conversation gets. The transcript scrolls inside its own
+       box, so a 500-turn conversation changes nothing. */
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 45vh);
     /* v0.10.8 — --app-height is set by the visualViewport handler so
        the app is sized to the VISIBLE area. The fallback is 100% for
        a browser with no visualViewport (desktop, or a very old
@@ -457,9 +471,13 @@ HTML = """<!DOCTYPE html>
        a long conversation scroll INSIDE the box instead of growing
        the box. `flex: 0 1 auto` + an explicit max-height means the
        transcript takes what it needs up to the cap and no more. */
-    flex: 0 1 auto;
+    /* v0.10.8 — the transcript fills the shell and scrolls inside
+       it. The shell row in the body grid is now a FIXED share
+       (45vh), so this no longer needs its own cap: the grid
+       decides how much room the conversation area gets, and the
+       transcript simply fills it and scrolls. */
+    flex: 1 1 auto;
     min-height: 0;
-    max-height: 34vh;
     padding: 20px;
     overflow-y: auto;
     border-top: 1px solid var(--bg-elev);
