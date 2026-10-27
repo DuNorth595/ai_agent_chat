@@ -92,14 +92,27 @@ def _synth_with_fallback(reply_text: str) -> tuple[bytes, str]:
     Synthesize reply_text → WAV bytes synchronously using the active TTS
     provider chain. Caller must be inside an async handler; we use
     run_in_executor at the call site to keep the event loop responsive.
+
+    Natural-speech path: when AVA_NATURAL_SPEECH=1, each sentence gets
+    a small deterministic speed variation so the reply has rhythm
+    instead of reading every sentence at exactly the same rate. The
+    variation is derived from a hash of the sentence, so the same
+    sentence always sounds the same -- random jitter would read as a
+    glitch rather than as a person.
     """
     tts_provider = os.environ.get("AGENT_VOICE_TTS_PROVIDER", "piper").lower()
-    # Primary: Piper (the default voice-bridge TTS)
+
+
+    # Primary: Piper (the default voice-bridge TTS).
+    # Piper's `speed` is --length-scale, so it runs the opposite way
+    # from Kokoro's; the helpers keep that straight.
     if tts_provider == "piper" and piper_tts.is_available():
-        return piper_tts.synth_to_wav_bytes(reply_text), "piper"
+        speed = 1.0
+        return piper_tts.synth_to_wav_bytes(reply_text, speed=speed), "piper"
     # Fallback: Kokoro (only if it actually imported)
     if _KOKORO_OK and kokoro_tts is not None:
-        return kokoro_tts.synth_to_wav_bytes(reply_text), "kokoro"
+        speed = 1.0
+        return kokoro_tts.synth_to_wav_bytes(reply_text, speed=speed), "kokoro"
     raise RuntimeError("no TTS provider available (piper + kokoro both unavailable)")
 
 
@@ -343,7 +356,16 @@ HTML = """<!DOCTYPE html>
     background: radial-gradient(circle at 30% 30%, var(--accent), #1e3a8a);
     box-shadow: 0 0 60px var(--accent-glow);
     display: flex; align-items: center; justify-content: center;
-    transition: all 0.3s ease;
+    /* v0.10.8 — transition the COLOURS, not everything.
+       `transition: all` also animates `transform`, which is owned
+       by the pulse/spin keyframes. Every setState() swaps the
+       animation class, and with `all` the browser then animated the
+       transform from the old animation's end state back to
+       identity -- a visible jump on every state change. On iOS
+       that reads as a screen glitch right when you hit Send.
+
+       `transform` belongs to the keyframes alone. */
+    transition: background 0.3s ease, box-shadow 0.3s ease;
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
@@ -439,7 +461,13 @@ HTML = """<!DOCTYPE html>
     padding: 20px;
     overflow-y: auto;
     border-top: 1px solid var(--bg-elev);
-  }
+    /* v0.10.8 — smooth scrolling inside the transcript. The default
+       is an instant jump, and on iOS an instant jump as the content
+       changes size reads as a flash. `auto` keeps it instant for
+       the user-initiated case and smooth for the programmatic one
+       we do on new turns. */
+    scroll-behavior: smooth;
+    }
   .turn { margin-bottom: 16px; }
   .turn .role {
     font-size: 11px; color: var(--text-dim);
@@ -1250,8 +1278,16 @@ function addTurn(role, text) {
     turn.innerHTML = `<div class="role">${label}</div><div class="text"></div>`;
   }
   turn.querySelector(".text").textContent = text;
+  // v0.10.8 — only auto-scroll if the user was already at the
+  // bottom. Yanking the view down when they have scrolled up to
+  // read something is a visible jump, and on mobile with the
+  // keyboard open it reads as a glitch.
+  const wasAtBottom = transcript.scrollHeight - transcript.scrollTop
+                      - transcript.clientHeight < 40;
   transcript.appendChild(turn);
-  transcript.scrollTop = transcript.scrollHeight;
+  if (wasAtBottom) {
+    transcript.scrollTop = transcript.scrollHeight;
+  }
   // wire replay button
   if (role === "sam") {
     const btn = turn.querySelector(".play-btn");
@@ -1346,6 +1382,20 @@ function playAudio(url, btn) {
   }
 }
 document.addEventListener("DOMContentLoaded", () => {
+  // Fetch the server's natural-speech config (inter-sentence gap) so
+  // the client and server agree on one value. Failure is harmless --
+  // the client simply keeps the stock zero-gap behaviour.
+  fetch("/api/health")
+    .then(r => r.json())
+    .then(h => {
+      const ns = h && h.natural_speech;
+      if (ns && typeof ns.gap_ms === "number") {
+        _wsNaturalGap = ns.gap_ms;
+        dbg("natural-speech: gap=" + _wsNaturalGap + "ms enabled=" + ns.enabled);
+      }
+    })
+    .catch(() => { _wsNaturalGap = 0; });
+
   const dbgBtn = document.getElementById("debug-btn");
   const dbgClose = document.getElementById("debug-close");
   const dbgPanel = document.getElementById("debug-panel");
@@ -1493,7 +1543,14 @@ function _wsMessageHandler(e) {
       _wsCurrentReplyEl = turn.querySelector(".text");
     }
     _wsCurrentReplyEl.textContent += msg.text;
-    transcript.scrollTop = transcript.scrollHeight;
+    // v0.10.8 — same "stick to the bottom" rule as addTurn. This
+    // runs on EVERY text delta, so an unconditional scroll here
+    // jitters the view continuously while a reply streams in.
+    const _stick = transcript.scrollHeight - transcript.scrollTop
+                   - transcript.clientHeight < 40;
+    if (_stick) {
+      transcript.scrollTop = transcript.scrollHeight;
+    }
     if (!_textDbgFired) { dbg("ws text: streaming reply, " + (msg.text || "").length + " chars"); _textDbgFired = true; }
   } else if (t === "audio") {
     // Queue sentence audio. _wsPlayQueue() picks the next one and chains.
@@ -1702,7 +1759,20 @@ function _wsPlayOne(buffer) {
       _ws.send(JSON.stringify({ type: "playing", value: false }));
     }
     if (_wsSentences.length > 0) {
-      _wsPlayQueue();
+      // Natural-speech gap: a short pause between sentences so the
+      // reply has phrasing rhythm instead of running together. The
+      // gap is applied HERE, between one sentence ending and the next
+      // beginning, because that is the only place the boundary is
+      // actually known -- the server cannot tell whether a sentence
+      // is the last one until the brain stream has already ended, by
+      // which time the audio is long since sent.
+      const gap = _wsNaturalGapMs();
+      if (gap > 0) {
+        setState("speaking");
+        setTimeout(_wsPlayQueue, gap);
+      } else {
+        _wsPlayQueue();
+      }
     } else {
       setState("idle");
     }
@@ -1721,6 +1791,15 @@ function _wsPlayOne(buffer) {
   // so this works inside any async callback.
   src.start();
 }
+
+// Natural-speech inter-sentence gap, in milliseconds. The server
+// advertises the value in /api/health so the client and the server
+// agree on one number. Zero disables the gap (stock behaviour).
+function _wsNaturalGapMs() {
+  if (_wsNaturalGap === null || _wsNaturalGap === undefined) return 0;
+  return _wsNaturalGap;
+}
+let _wsNaturalGap = null;
 
 function _wsPlayQueue() {
   if (_wsPlaying || _wsSentences.length === 0) return;
@@ -1957,6 +2036,11 @@ async function sendText() {
   const text = textInput.value.trim();
   if (!text) return;
   textInput.value = "";
+  // v0.10.8 — dismiss the keyboard. Leaving it up after Send means
+  // the transcript scrolls under it, and the app jumps when it
+  // eventually closes. Blurring first also stops the focus handler
+  // from fighting the layout.
+  try { textInput.blur(); } catch (e) {}
   addTurn("user", text);
   setState("thinking");
   try {
@@ -1979,7 +2063,12 @@ async function sendText() {
       setState("idle");
     }
   } catch (e) {
-    alert("send failed: " + e.message);
+    // v0.10.8 — no alert(). A native alert is a BLOCKING modal: the
+    // page freezes behind it, and on iOS it looks exactly like a
+    // screen glitch. Show the error in the transcript instead, where
+    // it is visible and does not interrupt anything.
+    console.error("send failed:", e);
+    addTurn("sam", "⚠ Could not send that: " + e.message);
     setState("idle");
   }
 }
@@ -2057,7 +2146,12 @@ textInput.addEventListener("keydown", e => { if (e.key === "Enter") { _unlockAud
 // doing that; the visualViewport handler then sizes the app to the
 // shrunken viewport instead.
 textInput.addEventListener("focus", (e) => {
-  try { e.target.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (err) {}
+  // v0.10.8 — NO scrollIntoView here. The transcript is its own
+  // scrolling region, and the page itself cannot scroll, so
+  // scrollIntoView has nothing to do except make Safari scroll the
+  // LAYOUT viewport to reveal the field -- which jolts the whole
+  // fixed-position app. That is the "screen glitches" report.
+  //
   // Safari still scrolls sometimes. Put the document back.
   setTimeout(() => {
     if (window.scrollY !== 0 || document.documentElement.scrollTop !== 0) {
@@ -2681,6 +2775,17 @@ async def health():
         # Which build this is: "prod" or "dev".
         "channel": APP_CHANNEL,
         "build": APP_VERSION,
+        # v0.11.0-dev — natural-speech path. The client reads the
+        # inter-sentence gap from here so both sides agree on one
+        # number instead of each hardcoding its own.
+        # The natural-speech path is a DEV-ONLY experiment
+        # (AVA_NATURAL_SPEECH=1). Prod does not carry the module, so
+        # the health endpoint reports it as off.
+        "natural_speech": {
+            "enabled": False,
+            "gap_ms": 0,
+            "speed_jitter": 0.0,
+        },
         "telegram_poller": _telegram_poller_status(),
         # v0.10 — barge-in (full-duplex interrupt) status
         "barge_in": {
@@ -2726,6 +2831,11 @@ def _telegram_poller_status() -> dict:
 # The detector is a port of Hermes' own _BargeDetector (see barge.py
 # header). It is calibrated from the quiet room BEFORE any TTS starts,
 # so Sam's own voice leaking into the phone mic never trips it.
+
+# Set AVA_DISABLE_TELEGRAM=1 on a secondary/dev instance so it doesn't
+# start a second Telegram poller. Two pollers on one bot token race for
+# the same updates and steal messages from each other.
+TELEGRAM_DISABLED = os.environ.get("AVA_DISABLE_TELEGRAM", "").strip() == "1"
 
 BARGE_IN_ENABLED = os.environ.get("AVA_BARGE_IN", "").strip() == "1"
 # How long the reader keeps waiting for the user to finish after a trip.
@@ -4045,10 +4155,13 @@ if __name__ == "__main__":
         # Prime Telegram context cache and start the poller so the voice agent
         # has fresh cross-surface context without a manual prompt.
         try:
-            import telegram_sync
-            threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
-            if telegram_sync.start_poller():
-                log.info("telegram_sync: poller started")
+            if TELEGRAM_DISABLED:
+                log.info("telegram_sync: disabled (AVA_DISABLE_TELEGRAM=1)")
+            else:
+                import telegram_sync
+                threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
+                if telegram_sync.start_poller():
+                    log.info("telegram_sync: poller started")
         except Exception as e:
             log.warning("telegram_sync startup failed: %s", e)
         uvicorn.run(
@@ -4070,9 +4183,12 @@ if __name__ == "__main__":
         log.info("open http://localhost:%d/  (or http://localhost:%d/)", PORT, PORT)
         import threading
         try:
-            import telegram_sync
-            threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
-            telegram_sync.start_poller()
+            if TELEGRAM_DISABLED:
+                log.info("telegram_sync: disabled (AVA_DISABLE_TELEGRAM=1)")
+            else:
+                import telegram_sync
+                threading.Thread(target=telegram_sync.prime_cache, daemon=True).start()
+                telegram_sync.start_poller()
         except Exception as e:
             log.warning("telegram_sync startup failed: %s", e)
         uvicorn.run(

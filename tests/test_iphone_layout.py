@@ -335,6 +335,52 @@ def main():
             })
             await asyncio.sleep(0.6)
 
+            # ── the "glitch when I click send" check ──
+            # The orb's `transition: all 0.3s ease` animates EVERY
+            # property -- including `transform`, which is owned by the
+            # pulse/spin keyframes. Switching the animation class
+            # (which setState does on every state change) animates the
+            # transform from the old animation's end state back to
+            # identity. That is a visible jump.
+            #
+            # The fix is to transition only the properties that should
+            # animate: the colours and the glow. `transform` belongs
+            # to the keyframes alone.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(1.2)
+
+            anim = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const orb = document.querySelector('.orb');
+                  const cs = getComputedStyle(orb);
+                  const props = cs.transitionProperty || '';
+                  return JSON.stringify({
+                    transitionProperty: props,
+                    transitionsTransform: /(^|,|\s)transform(\s|,|$)/.test(props),
+                    transitionAll: /(^|,|\s)all(\s|,|$)/.test(props),
+                    duration: cs.transitionDuration,
+                  });
+                })()
+                """,
+                "returnByValue": True,
+            })
+            a2 = json.loads(anim.get("result", {}).get("value") or "{}")
+
+            anim_ok = (not a2.get("transitionsTransform", True)
+                       and not a2.get("transitionAll", True))
+            if not anim_ok:
+                failures += 1
+            print(f"        orb transition: property="
+                  f"'{a2.get('transitionProperty')}' "
+                  f"duration={a2.get('duration')}")
+            print(f"        the orb does not animate transform: "
+                  f"{'OK ' if anim_ok else 'BAD'}")
+
             # ── the decisive check ──
             # The layout viewport is 852 (iOS keeps it that way).
             # The visible area is 516. The app's body must therefore
