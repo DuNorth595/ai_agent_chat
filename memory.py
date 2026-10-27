@@ -136,6 +136,29 @@ def _safe_read(path: Path, max_chars: int = 0) -> str:
         return ""
 
 
+def _safe_read_tail(path: Path, max_chars: int = 0) -> str:
+    """Read the LAST max_chars of a file.
+
+    For append-only files (a DAILY log), the newest entries are at
+    the bottom. Reading the head gives the oldest work, which is what
+    made the bridge answer "what are we working on?" with the
+    morning's thread instead of the current one.
+    """
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    if max_chars and len(text) > max_chars:
+        text = text[-max_chars:]
+        # Start at a line boundary so the excerpt is not a fragment.
+        nl = text.find("\n")
+        if 0 <= nl < 200:
+            text = text[nl + 1:]
+    return text
+
+
 def _read_fact_store_for_query(query: str, max_chars: int = MAX_FACTS_CHARS) -> str:
     """FTS5 search the fact_store for facts relevant to the query.
 
@@ -227,6 +250,17 @@ _LIFE_MEMORY_ROUTES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = 
      "SAM/PROJECTS_INDEX.md"),
     (("doing",), ("right", "now", "today", "currently", "focus"),
      "PROJECTS/INDEX.md"),
+    # "what are we working on" ALSO needs RECENT ACTIVITY, not just
+    # the inventory. PROJECTS_INDEX.md lists eight live projects and
+    # was last inventoried 2026-10-10 — it says what exists, not what
+    # is current. The newest daily log says what actually happened
+    # most recently, so route to it as well.
+    (("project", "working"), ("",),
+     "DAILY"),
+    (("working", "on"), ("project", "currently", "right", "now", "today"),
+     "DAILY"),
+    (("doing",), ("right", "now", "today", "currently", "focus"),
+     "DAILY"),
     # "what did we do today / what happened earlier"
     (("today",), ("did", "do", "we", "happen", "happened", "work", "been"),
      "DAILY"),
@@ -269,12 +303,29 @@ def _route_life_memory_files(query: str) -> list[Path]:
         target = LONG_TERM_MEMORY_DIR / rel
         if target.is_dir():
             # A directory route -> the newest daily log inside it.
-            logs = sorted(target.glob("*.md"), reverse=True)
+            # Skip INDEX.md: it is the chapter index, not a log, and
+            # reading it instead of the actual newest entry is the same
+            # class of bug as reading a daily log's head.
+            logs = sorted(
+                (p for p in target.glob("*.md") if p.name != "INDEX.md"),
+                reverse=True,
+            )
             if logs:
                 routed.append(logs[0])
         elif target.is_file():
             routed.append(target)
-    return routed
+    # De-duplicate while preserving order. SAM/PROJECTS_INDEX.md and
+    # PROJECTS/INDEX.md are different files with different content, but
+    # a directory route and a file route can resolve to the same
+    # basename, and the later files[:3] slice would then push the
+    # DAILY log out of the window entirely.
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for f in routed:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+    return unique
 
 
 def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> str:
@@ -402,14 +453,28 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
     out.append("## long-term memory — relevant context\n")
     remaining = max_chars
     for f in files[:3]:
-        chunk_size = min(remaining, 1500)
-        text = _safe_read(f, chunk_size)
+        # A DAILY log is append-only: the head is the OLDEST work and
+        # the tail is what actually happened most recently. Reading the
+        # head is exactly the bug that made the bridge answer with
+        # this morning's work when asked what we are working on now.
+        # Routed daily logs therefore read their TAIL.
+        is_daily = f.parent.name == "DAILY"
+        # The daily log gets its OWN budget. The two project indexes
+        # are long static tables and would otherwise consume the whole
+        # allowance, leaving nothing for the recent activity that
+        # actually answers "what are we working on".
+        chunk_size = min(remaining, 900 if is_daily else 700)
+        if is_daily:
+            text = _safe_read_tail(f, chunk_size)
+        else:
+            text = _safe_read(f, chunk_size)
         if text:
             try:
                 rel = f.relative_to(LONG_TERM_MEMORY_DIR)
             except ValueError:
                 rel = f
-            out.append(f"\n### {rel}\n{text}\n")
+            label = " (most recent entries)" if is_daily else ""
+            out.append(f"\n### {rel}{label}\n{text}\n")
             remaining -= len(text)
             if remaining <= 100:
                 break
