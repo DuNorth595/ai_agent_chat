@@ -286,6 +286,25 @@ HTML = """<!DOCTYPE html>
   .header .status {
     font-size: 12px; color: var(--text-dim);
     margin-left: auto;
+    /* v0.10.8 — the status text must NOT wrap.
+       The header is a flex row, and the status is a flex item. When
+       the text changed from "idle" to "thinking..." it did not fit
+       beside the 8px status dot, so it wrapped to a second line
+       and the status div DOUBLED in height (18px -> 36px). The
+       header is the FIRST grid row, so a header that grows 8px
+       pushes every row below it down 8px for a frame.
+
+       That is the "shakes up and down when I click send" bug --
+       measured at 8px of movement, on one frame, and then back
+       again. The element that moved was not the one the earlier
+       tests were watching.
+
+       `white-space: nowrap` keeps the status on one line; the
+       dot and the text sit side by side on the same line box. */
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .header .status .dot {
     display: inline-block; width: 8px; height: 8px; border-radius: 50%;
@@ -682,7 +701,7 @@ HTML = """<!DOCTYPE html>
     <img class="app-logo" src="/static/logo.jpg" alt="Sam logo" width="28" height="28">
     <h1>ai_agent_chat</h1>
     <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">idle</span></div>
-    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;">v__VERSION__ __CHANNEL__</div>
+    <div class="version" id="build-version" style="font-size:10px;color:#4a5a7a;margin-top:2px;white-space:nowrap;">v__VERSION__ __CHANNEL__</div>
     <!-- v0.10.8 — the debug log button moved to the header's top right.
          It used to live in the input row with the conversation
          controls, where six items needed 546px on a 393px iPhone and
