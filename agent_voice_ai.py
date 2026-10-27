@@ -166,18 +166,35 @@ HTML = """<!DOCTYPE html>
     color: var(--text);
     font: 16px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     height: 100%; overflow: hidden;
-    /* v0.10.8 — the page must not scroll, ever. On iOS the on-screen
-       keyboard does not resize the layout viewport; it shrinks the
-       VISUAL viewport and Safari scrolls the document up to reveal
-       the focused field. That scroll is what moved the PTT/Duplex
-       toggle off the top of the screen. `position: fixed` on the
-       body pins the whole layout to the viewport, so the keyboard
-       can only shrink it, never scroll it away. */
+    /* v0.10.8 — the page must not scroll, ever, and the app must
+       sit ABOVE the keyboard.
+
+       On iOS the on-screen keyboard does not resize the layout
+       viewport; it shrinks the VISUAL viewport and Safari scrolls
+       the document up to reveal the focused field. Two problems
+       follow:
+
+       1. The document scrolls, which moved the PTT/Duplex toggle
+          off the top of the screen.
+       2. `position: fixed; inset: 0` pins the app to the LAYOUT
+          viewport, which is still full screen height. The keyboard
+          then covers the bottom of the app -- which is where the
+          input row lives.
+
+       The fix: pin the app to the VISUAL viewport instead. The
+       visualViewport handler sets --app-top and --app-height, so
+       the app is exactly the visible area and the input row ends up
+       just above the keyboard.
+
+       `inset: 0` is deliberately NOT used -- it would override the
+       top/height the JS sets. */
     position: fixed;
-    inset: 0;
+    top: var(--app-top, 0px);
+    left: 0;
+    right: 0;
     width: 100%;
     overscroll-behavior: none;
-  }
+    }
   /* v0.10.8 — body is a GRID with three explicit rows:
        row 1  .header      (auto — its natural height)
        row 2  .stage       (1fr  — the orb area, takes the leftover)
@@ -205,10 +222,15 @@ HTML = """<!DOCTYPE html>
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) minmax(0, auto);
     /* v0.10.8 — --app-height is set by the visualViewport handler so
-       the app is sized to the VISIBLE area. It falls back to 100%
-       when the handler has not run (or on a browser with no
-       visualViewport). */
+       the app is sized to the VISIBLE area. The fallback is 100% for
+       a browser with no visualViewport (desktop, or a very old
+       iOS), where the layout viewport IS the visible area. */
     height: var(--app-height, 100%);
+    /* v0.10.8 — the bottom of the app must be the bottom of the
+       VISIBLE area, not of the layout viewport. With the height
+       above and `top` set by the JS, the grid ends exactly where
+       the keyboard begins. */
+    bottom: auto;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)
   }
   .header {
@@ -1148,15 +1170,36 @@ function _setMode(m) {
   if (!vv) return;
 
   function apply() {
-    // The visible height, minus nothing — safe-area padding is
-    // already handled by env() in the body rule.
+    // v0.10.8 — the app must sit ABOVE the keyboard, not under it.
+    //
+    // iOS does NOT resize the layout viewport when the keyboard
+    // opens. It shrinks the VISUAL viewport and, by default, keeps
+    // the layout viewport at full screen height -- so the keyboard
+    // simply covers the bottom of the page. The input row, which is
+    // the last row, is the part that gets covered.
+    //
+    // The fix has to move and SIZE the app, not just resize it:
+    //
+    //   offsetTop  -- how far the visual viewport is scrolled down
+    //                 from the layout viewport's top. When the
+    //                 keyboard opens, Safari scrolls the layout
+    //                 viewport up by this much.
+    //   height     -- how much of the page is actually visible.
+    //
+    // `position: fixed` with an explicit `top` and `height` puts
+    // the app exactly over the visible area, so the input row ends
+    // up sitting just above the keyboard.
     const h = Math.round(vv.height);
-    document.documentElement.style.setProperty("--app-height", h + "px");
+    const top = Math.round(vv.offsetTop);
+    const root = document.documentElement.style;
+    root.setProperty("--app-height", h + "px");
+    root.setProperty("--app-top", top + "px");
     document.body.style.height = h + "px";
-    // The keyboard moved the layout viewport up by an offset. Push
-    // the document back so the top of the app stays at the top.
-    if (vv.offsetTop > 0) {
-      window.scrollTo(0, vv.offsetTop);
+    document.body.style.top = top + "px";
+    // Push the document back so the top of the app stays at the top
+    // of the screen.
+    if (window.scrollY !== 0) {
+      window.scrollTo(0, 0);
     }
   }
 

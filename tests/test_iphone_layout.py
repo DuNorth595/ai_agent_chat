@@ -273,17 +273,111 @@ def main():
             })
             b = json.loads(before.get("result", {}).get("value") or "{}")
 
-            # Simulate the keyboard the way it actually works: the
-            # LAYOUT viewport gets shorter. Overriding
-            # window.innerHeight does NOT do this -- it only changes
-            # what a script reads, not how the page lays out, which is
-            # why the first version of this test passed with and
-            # without the fix.
-            await sess("Emulation.setDeviceMetricsOverride", {
-                "width": 393, "height": 852 - 336,
-                "deviceScaleFactor": 2, "mobile": True,
+            # Simulate the keyboard the way iOS ACTUALLY does it.
+            #
+            # iOS does NOT shrink the layout viewport when the
+            # keyboard opens -- it shrinks the VISUAL viewport, and
+            # the layout viewport stays full height. The keyboard then
+            # covers the bottom of the page.
+            #
+            # Emulation.setDeviceMetricsOverride shrinks the LAYOUT
+            # viewport, which is a different thing -- that is why the
+            # earlier version of this test could not tell a correct
+            # implementation from a broken one.
+            #
+            # So: shrink the layout viewport to the visible area
+            # (which is what the app's own JS does via
+            # visualViewport), AND offset the app by the difference,
+            # AND make the layout viewport taller than the visible
+            # area, exactly as iOS does.
+            await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const vv = window.visualViewport;
+                  const KEYBOARD = 336;
+                  const LAYOUT_H = 852;
+                  const VISIBLE_H = LAYOUT_H - KEYBOARD;
+
+                  // iOS: the layout viewport stays 852. The visual
+                  // viewport is 852-336 and is scrolled down by the
+                  // amount the layout viewport was scrolled.
+                  Object.defineProperty(vv, 'height',
+                    {configurable: true, get: () => VISIBLE_H});
+                  Object.defineProperty(vv, 'offsetTop',
+                    {configurable: true, get: () => 0});
+
+                  // The page's own layout is still 852 tall, so the
+                  // app must position itself over the visible part.
+                  Object.defineProperty(window, 'innerHeight',
+                    {configurable: true, get: () => LAYOUT_H});
+                  Object.defineProperty(document.documentElement,
+                    'clientHeight',
+                    {configurable: true, get: () => LAYOUT_H});
+
+                  // The KEYBOARD OPENING is what fires this. In
+                  // Chrome, shrinking the layout viewport is the
+                  // closest equivalent -- so set the layout viewport
+                  // to the FULL height and let the app's own handler
+                  // shrink it to the visible height. That is exactly
+                  // the iOS sequence: layout stays 852, the app
+                  // decides to be 516.
+                  window.dispatchEvent(new Event('resize'));
+                  vv.dispatchEvent(new Event('resize'));
+
+                  // Now verify the app actually shrank. If the
+                  // handler did not run, the app is still 852 tall
+                  // and its input is at the bottom -- under the
+                  // keyboard.
+                  return 'ok';
+                })()
+                """,
+                "returnByValue": True,
             })
             await asyncio.sleep(0.6)
+
+            # ── the decisive check ──
+            # The layout viewport is 852 (iOS keeps it that way).
+            # The visible area is 516. The app's body must therefore
+            # be 516 tall and start at y=0, so the input lands
+            # INSIDE the visible band.
+            #
+            # If the app were left at the layout height (852), its
+            # input would be at y~780 -- under the keyboard. That is
+            # the bug being fixed.
+            geom = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const st = getComputedStyle(document.body);
+                  const inp = document.getElementById('text-input');
+                  const ib = inp.getBoundingClientRect();
+                  const vv = window.visualViewport;
+                  return JSON.stringify({
+                    bodyH: Math.round(parseFloat(st.height)),
+                    bodyTop: Math.round(parseFloat(st.top)),
+                    inputBottom: Math.round(ib.bottom),
+                    visibleH: Math.round(vv ? vv.height : window.innerHeight),
+                    layoutH: window.innerHeight,
+                  });
+                })()
+                """,
+                "returnByValue": True,
+            })
+            g = json.loads(geom.get("result", {}).get("value") or "{}")
+
+            # The app must be no taller than the visible area.
+            app_fits_visible = g.get("bodyH", 99999) <= g.get("visibleH", 0) + 1
+            # And the input must be inside the visible band.
+            input_above_kbd = g.get("inputBottom", 99999) <= g.get("visibleH", 0) + 1
+
+            if not (app_fits_visible and input_above_kbd):
+                failures += 1
+            print(f"        app: bodyH={g.get('bodyH')} top={g.get('bodyTop')} "
+                  f"inputBottom={g.get('inputBottom')} "
+                  f"visibleH={g.get('visibleH')} layoutH={g.get('layoutH')}")
+            print(f"        app fits the visible area: "
+                  f"{'OK ' if app_fits_visible else 'BAD'}   "
+                  f"input above the keyboard: "
+                  f"{'OK ' if input_above_kbd else 'BAD'}")
 
             after = await sess("Runtime.evaluate", {
                 "expression": """
@@ -291,13 +385,31 @@ def main():
                   const t = document.getElementById('mode-toggle');
                   const b = t.getBoundingClientRect();
                   const st = getComputedStyle(document.body);
+                  const inp = document.getElementById('text-input');
+                  const ib = inp ? inp.getBoundingClientRect() : null;
+                  // The VISIBLE area. On iOS the keyboard eats the
+                  // bottom of the screen, so "above the keyboard"
+                  // means "inside the visual viewport", NOT "inside
+                  // window.innerHeight" -- the layout viewport is
+                  // still full height while the keyboard is up.
+                  const visibleH = window.visualViewport
+                    ? window.visualViewport.height
+                    : window.innerHeight;
                   return JSON.stringify({
                     top: Math.round(b.top),
-                    visible: b.top >= -1 && b.bottom <= window.innerHeight + 1,
+                    visible: b.top >= -1 && b.bottom <= visibleH + 1,
                     scrollY: window.scrollY,
                     bodyPosition: st.position,
                     bodyHeight: st.height,
+                    bodyTop: st.top,
                     vh: window.innerHeight,
+                    visibleH: Math.round(visibleH),
+                    // THE POINT: the input must be INSIDE the visible
+                    // area, i.e. ABOVE the keyboard, not under it.
+                    input_bottom: ib ? Math.round(ib.bottom) : null,
+                    input_visible: ib
+                      ? (ib.bottom <= visibleH + 1 && ib.top >= -1)
+                      : false,
                   });
                 })()
                 """,
@@ -312,14 +424,22 @@ def main():
                      and a.get("top", -999) >= 0
                      and a.get("scrollY", 1) == 0
                      and a.get("bodyPosition") == "fixed"
-                     and abs(a.get("top", 0) - b.get("top", 0)) <= 2)
+                     and abs(a.get("top", 0) - b.get("top", 0)) <= 2
+                     # the input must be ABOVE the keyboard, not under it
+                     and a.get("input_visible") is True
+                     and a.get("input_bottom", 99999)
+                         <= a.get("visibleH", 0) + 1)
             if not kb_ok:
                 failures += 1
             print(f"        before: top={b.get('top')} visible={b.get('visible')} "
                   f"scrollY={b.get('scrollY')} vh={b.get('vh')}")
             print(f"        after:  top={a.get('top')} visible={a.get('visible')} "
                   f"scrollY={a.get('scrollY')} body={a.get('bodyPosition')} "
-                  f"h={a.get('bodyHeight')} vh={a.get('vh')}")
+                  f"h={a.get('bodyHeight')} top={a.get('bodyTop')} vh={a.get('vh')}")
+            print(f"        input:  bottom={a.get('input_bottom')} "
+                  f"visible={a.get('input_visible')} "
+                  f"(must be <= visibleH {a.get('visibleH')} to be above "
+                  f"the keyboard; layout vh is {a.get('vh')})")
             print(f"        keyboard keeps the mode toggle: "
                   f"{'OK ' if kb_ok else 'BAD'}")
 
