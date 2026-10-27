@@ -136,6 +136,38 @@ def _safe_read(path: Path, max_chars: int = 0) -> str:
         return ""
 
 
+def _read_daily_outline(path: Path, max_sections: int = 12) -> str:
+    """Return the SECTION HEADINGS of a daily log, newest first.
+
+    A daily log is append-only and can run to thousands of lines. The
+    narrative of what happened is in its `## ` headings -- the
+    timestamps, the prose, and the tool transcripts in between are
+    detail. For "what are we working on?" the headings ARE the answer.
+
+    2026-10-26: routing to the raw tail gave the model 900 chars of
+    implementation chatter ("stale code... dev.sh"), which it correctly
+    judged to be the wrong kind of content -- so it went paging the
+    whole file with `offset`, 20-31 tool calls for one question. The
+    headings are short, self-describing, and say what was actually
+    worked on.
+    """
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    headings = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            headings.append(s[3:].strip())
+    if not headings:
+        return ""
+    out = [f"- {h}" for h in headings[-max_sections:]]
+    return "\n".join(out)
+
+
 def _safe_read_tail(path: Path, max_chars: int = 0) -> str:
     """Read the LAST max_chars of a file.
 
@@ -465,7 +497,25 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
         # actually answers "what are we working on".
         chunk_size = min(remaining, 900 if is_daily else 700)
         if is_daily:
-            text = _safe_read_tail(f, chunk_size)
+            # The OUTLINE first -- the `## ` headings are the narrative
+            # of what was actually worked on, and they are short. The
+            # raw tail is supporting detail underneath.
+            outline = _read_daily_outline(f, max_sections=12)
+            detail = _safe_read_tail(f, 600)
+            if outline:
+                text = (
+                    "WHAT HAPPENED TODAY, newest first (section headings "
+                    "from the daily log -- these ARE the current thread):\n"
+                    + outline
+                )
+                if detail:
+                    text += (
+                        "\n\nMost recent detail (already included above "
+                        "in summary -- do NOT read this file again):\n"
+                        + detail
+                    )
+            else:
+                text = detail
         else:
             text = _safe_read(f, chunk_size)
         if text:
@@ -473,7 +523,7 @@ def _read_life_memory_for_query(query: str, max_chars: int = MAX_LIFE_CHARS) -> 
                 rel = f.relative_to(LONG_TERM_MEMORY_DIR)
             except ValueError:
                 rel = f
-            label = " (most recent entries)" if is_daily else ""
+            label = " (today's work)" if is_daily else ""
             out.append(f"\n### {rel}{label}\n{text}\n")
             remaining -= len(text)
             if remaining <= 100:
@@ -508,8 +558,20 @@ def build_memory_context(user_text: str) -> str:
     routed = _read_life_memory_for_query(user_text)
     if routed:
         parts.append(
-            "## RETRIEVED MEMORY — this is the answer for this question. "
-            "Read it before using any tool.\n"
+            "## RETRIEVED MEMORY — this is the answer for this question.\n"
+            "\n"
+            "**HOW TO USE THIS BLOCK:**\n"
+            "- The content below was already selected and summarized FOR THIS "
+            "QUESTION. It IS the answer.\n"
+            "- Do NOT call `read_file`, `search_files`, or `exec_command` to "
+            "re-read any file named below, and do NOT page through a file "
+            "with successive `offset=` calls. Both waste the tool budget "
+            "and delay the reply.\n"
+            "- If the block contains 'WHAT HAPPENED TODAY', that list is "
+            "the day's work -- do not open the daily log again.\n"
+            "- Use a tool ONLY for something the block cannot know: live "
+            "weather, current traffic, the current time, a live URL.\n"
+            "\n"
             + routed + "\n"
         )
 
