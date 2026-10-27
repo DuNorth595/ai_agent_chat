@@ -586,6 +586,106 @@ def main():
             if not MOVED:
                 print("        nothing moved")
 
+            # ── the device-side watcher must work ──
+            # It is a diagnostic tool, so it needs its own test:
+            # with ?layoutwatch=1 it must arm, and it must report
+            # when something moves. Otherwise it is dead code that
+            # looks like a working diagnostic.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.navigate", {
+                "url": "http://127.0.0.1:8899/ava_page.html?layoutwatch=1",
+            })
+            await asyncio.sleep(1.5)
+
+            armed = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => JSON.stringify({
+                  armed: typeof window.__lwMark === 'function',
+                }))()
+                """,
+                "returnByValue": True,
+            })
+            a3 = json.loads(armed.get("result", {}).get("value") or "{}")
+            if not a3.get("armed"):
+                failures += 1
+            print(f"        the device-side watcher arms: "
+                  f"{'OK ' if a3.get('armed') else 'BAD'}")
+
+            # Capture what the watcher REPORTS. The watcher posts
+            # through dbg(), so stub that and read the lines.
+            await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  window.__reported = [];
+                  const orig = window.dbg;
+                  window.dbg = (m) => {
+                    if (typeof m === 'string'
+                        && m.indexOf('LAYOUTWATCH') === 0) {
+                      window.__reported.push(m);
+                    }
+                    return orig ? orig(m) : undefined;
+                  };
+                  return 'stubbed';
+                })()
+                """,
+                "returnByValue": True,
+            })
+
+            # Move something and confirm the watcher notices.
+            detected = await sess("Runtime.evaluate", {
+                "expression": """
+                (async () => {
+                  const before = document.querySelector('#orb-label')
+                    .getBoundingClientRect().top;
+                  // The watcher records the status text, because
+                  // THAT is what broke the layout -- it used to wrap
+                  // when it changed from "idle" to "thinking...", which
+                  // grew the header and pushed everything down.
+                  //
+                  // Change the status text and confirm the watcher
+                  // notices. The watcher posts to the server, so
+                  // instead of watching the log, check that the
+                  // watcher's own snapshot function sees the change.
+                  // Change the status text -- the exact change that
+                  // used to wrap and grow the header -- and let the
+                  // watcher notice.
+                  const st = document.getElementById('status-text');
+                  st.textContent = 'thinking...';
+                  await new Promise(r => setTimeout(r, 500));
+                  st.textContent = 'idle';
+                  await new Promise(r => setTimeout(r, 300));
+                  const rep = window.__reported || [];
+                  return JSON.stringify({
+                    reported: rep.length,
+                    sample: rep.length ? rep[rep.length - 1].slice(0, 220)
+                                        : '',
+                  });
+                })()
+                """,
+                "awaitPromise": True, "returnByValue": True,
+            })
+            d3 = json.loads(detected.get("result", {}).get("value") or "{}")
+            # The watcher must REPORT the change. It posts through
+            # dbg(), which the test stubbed, so the reports are
+            # captured in window.__reported.
+            watcher_ok = d3.get("reported", 0) > 0
+            if not watcher_ok:
+                failures += 1
+            print(f"        the watcher reports a real change: "
+                  f"{'OK ' if watcher_ok else 'BAD'} "
+                  f"({d3.get('reported')} reports)")
+            if d3.get("sample"):
+                print(f"          {d3.get('sample')}")
+
+            # Back to the plain page for the rest of the test.
+            await sess("Page.navigate", {
+                "url": "http://127.0.0.1:8899/ava_page.html",
+            })
+            await asyncio.sleep(1.2)
+
             # The verdict on the real send: NOTHING may move.
             # The header is the first grid row, so if it grows, every
             # row below it moves down -- that is the shake.
@@ -606,6 +706,210 @@ def main():
                           f"tops={tops} heights={heights}")
             else:
                 print("        NOTHING MOVED during a real send")
+
+            # ── the KEYBOARD CLOSING, from the screen recording ──
+            # The recording showed: keyboard open -> Send -> keyboard
+            # closes -> the orb's bright peak moves 197 -> 277 -> 286
+            # -> 319 -> 418. The app was sized to the visual viewport,
+            # so closing the keyboard re-laid-out the whole page.
+            #
+            # Now the app is always full-screen, so this must move
+            # NOTHING except the input row.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(1.5)
+
+            kb = await sess("Runtime.evaluate", {
+                "expression": """
+                (async () => {
+                  const vv = window.visualViewport;
+                  const KEYBOARD = 336;
+                  const LAYOUT_H = window.innerHeight;
+                  const orb = () => document.getElementById('orb')
+                    .getBoundingClientRect();
+                  const inp = () => document.getElementById('text-input')
+                    .getBoundingClientRect();
+                  const snap = (label) => ({
+                    label: label,
+                    orbTop: Math.round(orb().top),
+                    orbH: Math.round(orb().height),
+                    toggleTop: Math.round(
+                      document.getElementById('mode-toggle')
+                        .getBoundingClientRect().top),
+                    stageH: Math.round(
+                      document.getElementById('stage')
+                        .getBoundingClientRect().height),
+                    headerH: Math.round(
+                      document.querySelector('.header')
+                        .getBoundingClientRect().height),
+                    inputBottom: Math.round(inp().bottom),
+                    layoutH: LAYOUT_H,
+                    visibleH: Math.round(vv.height),
+                    kbH: LAYOUT_H - Math.round(vv.height),
+                  });
+
+                  const out = [];
+
+                  // 1. keyboard OPEN
+                  Object.defineProperty(vv, 'height',
+                    {configurable: true, get: () => LAYOUT_H - KEYBOARD});
+                  vv.dispatchEvent(new Event('resize'));
+                  await new Promise(r => setTimeout(r, 350));
+                  out.push(snap('keyboard-open'));
+
+                  // 2. keyboard CLOSED (what the blur used to cause)
+                  Object.defineProperty(vv, 'height',
+                    {configurable: true, get: () => LAYOUT_H});
+                  vv.dispatchEvent(new Event('resize'));
+                  await new Promise(r => setTimeout(r, 350));
+                  out.push(snap('keyboard-closed'));
+
+                  return JSON.stringify(out);
+                })()
+                """,
+                "awaitPromise": True, "returnByValue": True,
+            })
+            kbd = json.loads(kb.get("result", {}).get("value") or "[]")
+            if len(kbd) == 2:
+                a, b = kbd[0], kbd[1]
+                for key in ("orbTop", "orbH", "toggleTop", "stageH",
+                            "headerH"):
+                    same = a.get(key) == b.get(key)
+                    if not same:
+                        failures += 1
+                    print(f"        {key:<12} keyboard open="
+                          f"{a.get(key)}  closed={b.get(key)}  "
+                          f"{'OK ' if same else 'BAD'}")
+                print(f"        the input row rides above the keyboard: "
+                      f"open_bottom={a.get('inputBottom')} "
+                      f"(visible ends at {a.get('visibleH')})")
+            else:
+                failures += 1
+                print(f"        BAD: only got {len(kbd)} snapshots")
+
+            # ── the flicker: the transcript must not scroll BACK ──
+            # The screen recording showed the conversation appearing
+            # once in one frame and twice in the next, over and over.
+            # That is the transcript scrolling up and down: two turns,
+            # two opposite scroll decisions.
+            #
+            # The cause was the stick-to-bottom check reading
+            # scrollHeight and clientHeight at different moments, so
+            # the answer flipped between turns.
+            await sess("Emulation.setDeviceMetricsOverride", {
+                "width": 393, "height": 852,
+                "deviceScaleFactor": 2, "mobile": True,
+            })
+            await sess("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(1.5)
+
+            flick = await sess("Runtime.evaluate", {
+                "expression": """
+                (async () => {
+                  const tr = document.getElementById('transcript');
+                  const empty = tr.querySelector('.empty');
+                  if (empty) empty.remove();
+                  const positions = [];
+                  // Add turns the way sendText does.
+                  for (let i = 0; i < 6; i++) {
+                    const t = document.createElement('div');
+                    t.className = 'turn user';
+                    t.innerHTML = '<div class="role">you</div>'
+                      + '<div class="text">Test message number '
+                      + i + ' with some length to it</div>';
+                    tr.appendChild(t);
+                    const atBottomBefore = tr.scrollHeight - tr.scrollTop
+                                           - tr.clientHeight;
+                    const stick = atBottomBefore < 40;
+                    // Scroll the way addTurn does, THEN measure.
+                    if (stick) {
+                      tr.scrollTop = tr.scrollHeight;
+                    }
+                    // scroll-behavior:smooth animates the scroll, so
+                    // wait for it to SETTLE rather than guessing a
+                    // duration -- 120ms was sometimes not enough and
+                    // the test caught it mid-animation.
+                    let lastTop = -1, still = 0;
+                    for (let k = 0; k < 40; k++) {
+                      await new Promise(r => setTimeout(r, 25));
+                      const t = Math.round(tr.scrollTop);
+                      if (t === lastTop) { if (++still >= 3) break; }
+                      else { still = 0; lastTop = t; }
+                    }
+                    positions.push({
+                      scrollTop: Math.round(tr.scrollTop),
+                      max: Math.round(tr.scrollHeight - tr.clientHeight),
+                      wasAtBottom: stick,
+                    });
+                  }
+                  return JSON.stringify(positions);
+                })()
+                """,
+                "awaitPromise": True, "returnByValue": True,
+            })
+            pos = json.loads(flick.get("result", {}).get("value") or "[]")
+            # After every turn, scrollTop should be at the maximum
+            # (we started at the bottom, so we should stay there).
+            # If it is ever less than the max, the view jumped.
+            # The scroll position must never DECREASE, and when we
+            # were at the bottom it must end at the bottom.
+            backwards = []
+            for i, p in enumerate(pos):
+                if i and p["scrollTop"] < pos[i - 1]["scrollTop"]:
+                    backwards.append(p)
+                if p["wasAtBottom"] and p["max"] > 0 \
+                        and p["scrollTop"] < p["max"] - 2:
+                    backwards.append(p)
+            if backwards:
+                failures += 1
+            print(f"        transcript scroll positions: "
+                  f"{[(p['scrollTop'], p['max']) for p in pos]}")
+            print(f"        the transcript never scrolls BACK: "
+                  f"{'OK ' if not backwards else 'BAD'}")
+
+            # The transcript must actually SCROLL. scrollTop stayed 0
+            # while the content grew past the box, so the user cannot
+            # read the latest message.
+            box = await sess("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                  const tr = document.getElementById('transcript');
+                  const cs = getComputedStyle(tr);
+                  const shell = document.getElementById('chat-shell');
+                  const scs = getComputedStyle(shell);
+                  return JSON.stringify({
+                    trH: Math.round(tr.getBoundingClientRect().height),
+                    trScrollH: tr.scrollHeight,
+                    trClientH: tr.clientHeight,
+                    overflowY: cs.overflowY,
+                    trFlex: cs.flex,
+                    trMinH: cs.minHeight,
+                    trMaxH: cs.maxHeight,
+                    shellH: Math.round(shell.getBoundingClientRect().height),
+                    shellFlex: scs.flex,
+                    shellMinH: scs.minHeight,
+                    shellDisplay: scs.display,
+                  });
+                })()
+                """,
+                "returnByValue": True,
+            })
+            bx = json.loads(box.get("result", {}).get("value") or "{}")
+            scroll_ok = (bx.get("trScrollH", 0) > bx.get("trClientH", 0)
+                         and bx.get("overflowY") == "auto")
+            if not scroll_ok:
+                failures += 1
+            print(f"        the transcript box: "
+                  f"h={bx.get('trH')} scrollH={bx.get('trScrollH')} "
+                  f"clientH={bx.get('trClientH')} "
+                  f"overflowY={bx.get('overflowY')} "
+                  f"flex={bx.get('trFlex')} maxH={bx.get('trMaxH')} "
+                  f"shellH={bx.get('shellH')} shellFlex={bx.get('shellFlex')}")
+            print(f"        the transcript can scroll: "
+                  f"{'OK ' if scroll_ok else 'BAD'}")
 
             # ── the balance check ──
             # The conversation area now takes a fixed 45vh, so the

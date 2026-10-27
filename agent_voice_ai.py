@@ -189,9 +189,10 @@ HTML = """<!DOCTYPE html>
        `inset: 0` is deliberately NOT used -- it would override the
        top/height the JS sets. */
     position: fixed;
-    top: var(--app-top, 0px);
+    top: 0;
     left: 0;
     right: 0;
+    bottom: 0;
     width: 100%;
     overscroll-behavior: none;
     }
@@ -234,12 +235,16 @@ HTML = """<!DOCTYPE html>
        conversation area keep the same sizes no matter how long the
        conversation gets. The transcript scrolls inside its own
        box, so a 500-turn conversation changes nothing. */
-    grid-template-rows: auto minmax(0, 1fr) minmax(0, 45vh);
-    /* v0.10.8 — --app-height is set by the visualViewport handler so
-       the app is sized to the VISIBLE area. The fallback is 100% for
-       a browser with no visualViewport (desktop, or a very old
-       iOS), where the layout viewport IS the visible area. */
-    height: var(--app-height, 100%);
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+    /* v0.10.8 — the app is ALWAYS the full screen. It must not
+       resize when the keyboard opens or closes: a height change
+       re-lays-out the grid and moves the orb 80-90px, which is the
+       "shakes up and down when I click send" bug.
+
+       The keyboard overlays the app. The input row is the only
+       thing that moves, lifted by --keyboard-height so it sits
+       just above the keyboard. */
+    height: 100%;
     /* v0.10.8 — the bottom of the app must be the bottom of the
        VISIBLE area, not of the layout viewport. With the height
        above and `top` set by the JS, the grid ends exactly where
@@ -526,8 +531,29 @@ HTML = """<!DOCTYPE html>
     padding: 12px 14px;
     border-top: 1px solid var(--bg-elev);
     display: flex; gap: 8px; align-items: center;
-    /* v0.10.8 — never let the input row be squeezed out of existence */
     flex: 0 0 auto;
+    /* v0.10.8 — the input row FLOATS at the bottom of the app and is
+       lifted by the keyboard height.
+
+       It cannot be a normal flow item: the shell is a grid row that
+       ends at the app's bottom edge, and the keyboard OVERLAYS the
+       app, so a margin pushes the row off the screen instead of
+       lifting it above the keyboard. Taking it out of the flow and
+       positioning it against the app's bottom edge is what puts it
+       exactly where the user expects.
+
+       The page itself is ALWAYS full-screen, so this is the ONLY
+       thing that moves -- the orb, the toggle and the transcript
+       stay exactly where they are.
+
+       --keyboard-height is set by the visualViewport handler. When
+       the keyboard is closed it is 0px, so the row sits at the
+       bottom of the screen as normal. */
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    margin-bottom: var(--keyboard-height, 0px);
+    z-index: 5;
+    transition: margin-bottom 0.18s ease-out;
   }
   /* v0.10.8 — the input is the only thing that may shrink. The
      buttons keep their natural size, and `min-width: 0` on the input
@@ -629,13 +655,28 @@ HTML = """<!DOCTYPE html>
      The conversation scrolls INSIDE .transcript. The input row stays
      pinned to the bottom of the viewport, forever. */
   .chat-shell {
-    /* v0.10.8 — the third grid row. minmax(0, auto) lets it size to
-       the controls plus a bounded transcript, and never past the
-       space the grid gives it. */
+    /* v0.10.8 — the third grid row. It fills the space the grid
+       gives it and never grows past it. */
     position: relative;
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  /* v0.10.8 — the input row FLOATS at the bottom of the app and is
+     lifted by the keyboard height.
+
+     It cannot be a normal flow item: the shell is a grid row that
+     ends at the app's bottom edge, and the keyboard OVERLAYS the
+     app, so a margin pushes the row off the screen instead of
+     lifting it above the keyboard. Taking it out of the flow and
+     positioning it against the app's bottom edge is what puts it
+     exactly where the user expects.
+
+     The transcript gets matching bottom padding so its last line
+     is not hidden behind the row. */
+  .transcript {
+    /* room for the floating input row */
+    padding-bottom: calc(20px + 62px);
   }
   .chat-bar { display: flex; justify-content: flex-end; align-items: center; margin: 0 0 6px 0; }
   .hide-btn {
@@ -1241,19 +1282,40 @@ function _setMode(m) {
     // `position: fixed` with an explicit `top` and `height` puts
     // the app exactly over the visible area, so the input row ends
     // up sitting just above the keyboard.
-    const h = Math.round(vv.height);
+    // v0.10.8 — the app's HEIGHT must not depend on the keyboard.
+    //
+    // It used to: the body was sized to visualViewport.height, so
+    // the keyboard opening shrank the app and closing it grew the
+    // app back. The grid re-laid-out each time and the orb MOVED
+    // 80-90px. The screen recording showed it exactly: the orb's
+    // bright peak went 197 -> 277 -> 286 -> 319 -> 418 as the
+    // keyboard closed after the send.
+    //
+    // Now the app is ALWAYS the full screen (the layout viewport),
+    // and the keyboard simply overlays it. The INPUT ROW is the
+    // only thing that moves, and it is positioned from the visual
+    // viewport so it sits right above the keyboard.
+    //
+    // Nothing else reflows, so nothing else can shake.
+    const layoutH = window.innerHeight;
+    const visibleH = Math.round(vv.height);
     const top = Math.round(vv.offsetTop);
+    const keyboardH = Math.max(0, layoutH - visibleH - top);
+
     const root = document.documentElement.style;
-    root.setProperty("--app-height", h + "px");
-    root.setProperty("--app-top", top + "px");
-    document.body.style.height = h + "px";
-    document.body.style.top = top + "px";
-    // Push the document back so the top of the app stays at the top
-    // of the screen.
+    // The app is always the full screen.
+    root.setProperty("--app-height", layoutH + "px");
+    root.setProperty("--app-top", "0px");
+    // How much room the keyboard is taking, so the input row can
+    // be lifted clear of it.
+    root.setProperty("--keyboard-height", keyboardH + "px");
+    // How far down the visible area starts.
+    root.setProperty("--visible-top", top + "px");
+
     if (window.scrollY !== 0) {
       window.scrollTo(0, 0);
     }
-  }
+    }
 
   apply();
   vv.addEventListener("resize", apply);
@@ -1318,13 +1380,28 @@ function addTurn(role, text) {
   }
   turn.querySelector(".text").textContent = text;
   // v0.10.8 — only auto-scroll if the user was already at the
-  // bottom. Yanking the view down when they have scrolled up to
-  // read something is a visible jump, and on mobile with the
-  // keyboard open it reads as a glitch.
-  const wasAtBottom = transcript.scrollHeight - transcript.scrollTop
-                      - transcript.clientHeight < 40;
+  // bottom.
+  //
+  // The previous version read `scrollHeight` BEFORE the append and
+  // `clientHeight` at the same instant, so the two numbers came
+  // from different states of the box. When the grid resized (which
+  // it does when a turn is added) they disagreed, the check
+  // flipped, and the NEXT turn read the opposite answer and
+  // scrolled back. Two turns, two opposite scrolls -- and the
+  // conversation appeared to flicker in and out.
+  //
+  // The screen recording showed exactly that: the same "Test /
+  // Could not send that" exchange appearing once in one frame and
+  // twice in the next, over and over.
+  //
+  // Measure the distance from the bottom BEFORE the append, and
+  // scroll AFTER it. Both numbers then refer to the same box.
+  const atBottomBefore = transcript.scrollHeight
+                         - transcript.scrollTop
+                         - transcript.clientHeight;
+  const stick = atBottomBefore < 40;
   transcript.appendChild(turn);
-  if (wasAtBottom) {
+  if (stick) {
     transcript.scrollTop = transcript.scrollHeight;
   }
   // wire replay button
@@ -1582,12 +1659,14 @@ function _wsMessageHandler(e) {
       _wsCurrentReplyEl = turn.querySelector(".text");
     }
     _wsCurrentReplyEl.textContent += msg.text;
-    // v0.10.8 — same "stick to the bottom" rule as addTurn. This
-    // runs on EVERY text delta, so an unconditional scroll here
-    // jitters the view continuously while a reply streams in.
-    const _stick = transcript.scrollHeight - transcript.scrollTop
-                   - transcript.clientHeight < 40;
-    if (_stick) {
+    // v0.10.8 — same "stick to the bottom" rule as addTurn, and the
+    // same fix: measure the distance from the bottom BEFORE the
+    // content grows, and scroll AFTER. Reading scrollHeight and
+    // clientHeight at different moments makes the check flip, and
+    // the view jitters on every delta.
+    const _dist = transcript.scrollHeight - transcript.scrollTop
+                  - transcript.clientHeight;
+    if (_dist < 40) {
       transcript.scrollTop = transcript.scrollHeight;
     }
     if (!_textDbgFired) { dbg("ws text: streaming reply, " + (msg.text || "").length + " chars"); _textDbgFired = true; }
@@ -2071,17 +2150,137 @@ async function sendAudio(wavBlob) {
   }
 }
 
+// v0.10.8 — device-side layout watcher.
+//
+// Enabled with ?layoutwatch=1 in the URL. It samples the layout on
+// every animation frame and reports any element that MOVED, with
+// the direction and the size of the change. The report goes to the
+// server via the existing /api/debug channel, so the shake can be
+// diagnosed from the server log on a real iPhone -- which is the
+// only place it actually reproduces.
+(function _layoutWatcher() {
+  try {
+    if (!/[?&]layoutwatch=1/.test(location.search)) return;
+  } catch (e) { return; }
+
+  const IDS = {
+    header: ".header",
+    toggle: "#mode-toggle",
+    stage: "#stage",
+    orb: "#orb",
+    shell: "#chat-shell",
+    transcript: "#transcript",
+    controls: ".controls",
+    input: "#text-input",
+  };
+
+  const snap = () => {
+    const o = { vv: [], scrollY: Math.round(window.scrollY) };
+    const vv = window.visualViewport;
+    if (vv) {
+      o.vv = [Math.round(vv.height), Math.round(vv.offsetTop),
+              Math.round(vv.scale * 100) / 100];
+    }
+    o.innerH = window.innerHeight;
+    o.docH = Math.round(document.documentElement.getBoundingClientRect().height);
+    o.bodyH = Math.round(document.body.getBoundingClientRect().height);
+    // The status text is what BROKE the layout: it used to wrap when
+    // it changed from "idle" to "thinking...", which grew the header
+    // and pushed everything below it down. Record it so the watcher
+    // can see that class of bug even when the geometry no longer
+    // changes.
+    o.status = (document.getElementById('status-text') || {}).textContent;
+    // The transcript's scroll state -- another thing that can move
+    // the content unexpectedly.
+    const trEl = document.getElementById('transcript');
+    o.trScrollH = trEl ? trEl.scrollHeight : -1;
+    o.trScrollTop = trEl ? Math.round(trEl.scrollTop) : -1;
+    for (const k in IDS) {
+      const e = document.querySelector(IDS[k]);
+      if (!e) continue;
+      const b = e.getBoundingClientRect();
+      o[k] = [Math.round(b.top), Math.round(b.height),
+              Math.round(b.left), Math.round(b.width)];
+    }
+    return o;
+  };
+
+  let prev = snap();
+  let last = prev;
+  let reporting = false;
+
+  // A named moment in the send sequence. The full layout is sent,
+  // so the server log shows the state at each step and what changed
+  // between them.
+  window.__lwMark = (label) => {
+    try {
+      const s = snap();
+      last = s;
+      dbg("LAYOUTWATCH MARK " + label + " " + JSON.stringify(s));
+    } catch (e) { /* ignore */ }
+  };
+
+  const report = (what) => {
+    if (reporting) return;
+    reporting = true;
+    try {
+      dbg("LAYOUTWATCH " + what + " " + JSON.stringify(last));
+    } catch (e) { /* ignore */ }
+    setTimeout(() => { reporting = false; }, 200);
+  };
+
+  const tick = () => {
+    const now = snap();
+    const moved = [];
+    for (const k in now) {
+      if (k === "vv") continue;
+      const a = prev[k], b = now[k];
+      if (a === undefined || b === undefined) continue;
+      if (Array.isArray(a) && Array.isArray(b)) {
+        for (let i = 0; i < b.length; i++) {
+          if (a[i] !== b[i]) { moved.push(k + "[" + i + "] " + a[i] + "->" + b[i]); break; }
+        }
+      } else if (a !== b) {
+        moved.push(k + " " + a + "->" + b);
+      }
+    }
+    if (moved.length) {
+      last = now;
+      report("MOVED " + moved.join(" | "));
+    }
+    prev = now;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+  dbg("LAYOUTWATCH armed");
+})();
+
 async function sendText() {
   const text = textInput.value.trim();
   if (!text) return;
+  // v0.10.8 — mark the moments around a send, so the server log
+  // shows exactly what moved at each step.
+  if (window.__lwMark) window.__lwMark("send:begin");
   textInput.value = "";
-  // v0.10.8 — dismiss the keyboard. Leaving it up after Send means
-  // the transcript scrolls under it, and the app jumps when it
-  // eventually closes. Blurring first also stops the focus handler
-  // from fighting the layout.
-  try { textInput.blur(); } catch (e) {}
+  // v0.10.8 — do NOT blur the input.
+  //
+  // An earlier version called textInput.blur() here to dismiss the
+  // keyboard. That was the cause of the "shakes up and down when I
+  // click send" bug: dismissing the keyboard changes the visual
+  // viewport, and the app was sized to the visual viewport, so the
+  // whole page re-laid-out. The screen recording showed the orb's
+  // bright peak moving 197 -> 277 -> 286 -> 319 -> 418 as the
+  // keyboard closed.
+  //
+  // The app is now always full-screen and the input row floats
+  // above the keyboard, so the keyboard can stay open and NOTHING
+  // else moves. Leaving it up is also what you want: you can read
+  // the reply and keep typing.
+  if (window.__lwMark) window.__lwMark("send:after-blur-skipped");
   addTurn("user", text);
+  if (window.__lwMark) window.__lwMark("send:after-addTurn");
   setState("thinking");
+  if (window.__lwMark) window.__lwMark("send:after-thinking");
   try {
     const r = await fetch("/api/chat", {
       method: "POST",

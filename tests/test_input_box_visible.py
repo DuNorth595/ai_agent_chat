@@ -115,6 +115,17 @@ def test_layout_rules():
           "max-height" in transcript, transcript[:140])
 
     controls = css_block(src, ".controls")
+    # v0.10.8 — the input row FLOATS: it is absolutely positioned at
+    # the bottom of the app and lifted by the keyboard height, so it
+    # can sit above the keyboard. A flow item cannot do that -- the
+    # keyboard overlays the app, so a margin would push the row off
+    # the screen instead of lifting it.
+    check("the input row floats (position: absolute)",
+          "position: absolute" in controls, controls[:140])
+    check("the input row is anchored to the bottom",
+          "bottom: 0" in controls, controls[:140])
+    check("the input row is lifted by the keyboard height",
+          "keyboard-height" in controls, controls[:140])
     check("controls row is pinned (flex: 0 0 auto)",
           "flex: 0 0 auto" in controls, controls[:140])
 
@@ -163,6 +174,24 @@ def test_removed_controls():
 def test_no_regression_guards():
     print("\n── the trap that keeps biting ──")
     src = get_source()
+
+    body = css_block(src, "body", at_line_start=True)
+
+    # v0.10.8 — the app must NEVER be sized to the visual viewport.
+    # That was the cause of the "shakes up and down when I click
+    # send": the body was sized to visualViewport.height, so the
+    # keyboard opening shrank the app and closing it grew the app
+    # back, re-laying-out the grid each time. The screen recording
+    # showed the orb's bright peak moving 197 -> 277 -> 286 -> 319
+    # -> 418 as the keyboard closed.
+    #
+    # The app is always the full screen. The keyboard overlays it,
+    # and the input row is the only thing that moves.
+    check("the app is NOT sized to the visual viewport",
+          "--app-height" not in body,
+          "the body uses --app-height, so it resizes with the keyboard")
+    check("the app is always the full screen",
+          "height: 100%" in body, body[:140])
 
     # The GRID ROW is the guard, not the transcript's flex value.
     #
