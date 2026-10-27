@@ -1,5 +1,11 @@
 # ai_agent_chat
 
+A **full-duplex voice AI assistant** you can **interrupt mid-sentence** — push-to-talk or barge-in, from your phone, over a VPN (Tailscale).
+
+**Local by design:** Whisper for speech recognition, Piper or Kokoro for text-to-speech, and an LLM bridge you can point at any provider. Your voice never leaves your machine.
+
+*Keywords: voice assistant, voice chat, conversational AI, barge-in, full-duplex audio, push-to-talk, realtime voice, interrupt, speech recognition, text-to-speech, Whisper, Piper, Kokoro, self-hosted, local-first, private, VPN, Tailscale, FastAPI, Python, iPhone.*
+
 <p align="center">
   <img src="docs/social-preview.jpg" alt="ai_agent_chat — social preview" width="600">
 </p>
