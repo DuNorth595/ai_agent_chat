@@ -37,6 +37,7 @@ Run:
 """
 
 import sys
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -98,9 +99,12 @@ def test_intent_routing_reaches_real_memory():
           str([h.name for h in daily]))
 
     # "who am i" -> the identity file, not a random family member.
+    # The file is named by configuration, so the test checks the
+    # configured name rather than a particular person's filename.
     who = memory._route_life_memory_files("who am i")
-    check("who am i routes to justin.md",
-          len(who) == 1 and who[0].name == "justin.md",
+    expected_identity = os.environ.get("AVA_IDENTITY_FILE", "").strip() or "PEOPLE/identity.md"
+    check("who am i routes to the identity file",
+          len(who) == 1 and who[0].name == Path(expected_identity).name,
           str([h.name for h in who]))
 
     # An unrelated question must NOT route anywhere.

@@ -268,6 +268,18 @@ def _read_fact_store_for_query(query: str, max_chars: int = MAX_FACTS_CHARS) -> 
 # `context` tokens are OPTIONAL but, when present, must include at
 # least one of them. They stop a route firing on a token that merely
 # appears in passing.
+def _identity_file() -> str:
+    """The path of the identity file, relative to the memory root.
+
+    Override with AVA_IDENTITY_FILE. The default is PEOPLE/<name>.md,
+    matching the layout the memory tree uses.
+    """
+    configured = os.environ.get("AVA_IDENTITY_FILE", "").strip()
+    if configured:
+        return configured
+    return "PEOPLE/identity.md"
+
+
 _LIFE_MEMORY_ROUTES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
     # "what project are we working on / what's active right now"
     (("project", "working"), ("",),
@@ -299,10 +311,14 @@ _LIFE_MEMORY_ROUTES: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = 
     (("happened",), ("today", "earlier", "tonight", "yesterday", "recently"),
      "DAILY"),
     # "who am i / where do i live / tell me about me"
+    # The identity file is named by configuration, not hardcoded, so the
+    # repository does not ship anyone's personal filename. Set
+    # AVA_IDENTITY_FILE to point at yours; it defaults to the conventional
+    # PEOPLE/<name>.md layout under the memory root.
     (("who",), ("am", "i", "me", "myself", "about"),
-     "PEOPLE/identity.md"),
+     _identity_file()),
     (("about",), ("me", "myself", "my", "life"),
-     "PEOPLE/identity.md"),
+     _identity_file()),
 )
 
 

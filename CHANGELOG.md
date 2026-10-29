@@ -4,6 +4,60 @@ All notable changes to **ai_agent_chat** are documented here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates
 are ISO 8601.
 
+## [0.11.0] — 2026-10-27
+
+### Added
+- **The voice-channel gateway** (`skills_bridge.py`, renamed from
+  `sam_zello_client.py`) — connects the agent to a voice channel over
+  Tailscale, so it can be reached from a phone rather than only from the
+  browser.
+- **A social preview image** (`docs/social-preview.jpg`) for the README.
+
+### Fixed
+- **The API-key lookup chain works again.** The gateway could not find
+  its key and fell back to the wrong source.
+- **The gateway test was de-personalised** — it no longer depends on a
+  specific person's environment to pass.
+- **The social preview artwork was re-cropped** so nothing is cut off.
+
+### Changed
+- The README now opens in plain words rather than jargon, so the project
+  is findable by someone searching for what it does.
+
+## [0.10.9] — 2026-10-26
+
+### Added
+- **The build channel is stamped in the UI header**, so it is always
+  obvious which deployment you are talking to.
+
+### Fixed
+- **The two voices no longer talk over each other.**
+- **The brain retries transient provider failures** instead of dropping
+  the turn.
+- **The bridge's memory retrieval actually works** — it was reaching
+  the wrong store.
+- **The bridge routes to the real memories**, and puts the answer first
+  rather than burying it.
+- **A project question routes to recent activity**, not just to the
+  inventory.
+- **The model no longer re-reads memory it already has.**
+
+## [0.10.8] — 2026-10-26
+
+### Fixed
+- **The top of the screen stays fixed on a phone.** The layout scrolled
+  away under the on-screen keyboard.
+- **The input box sits above the on-screen keyboard** instead of being
+  hidden behind it.
+- **The page no longer shakes when you hit Send.** It was the status
+  text wrapping, which reflowed the layout on every message.
+- **The screen no longer glitches on Send** — the app had been sized to
+  the keyboard, so the viewport resized under the finger.
+
+### Added
+- **A layout test** (`c18c44e`) that proves the phone-layout fixes
+  across iPhone viewports with the keyboard open.
+
 ## [0.10.7] — 2026-10-26
 
 ### Added

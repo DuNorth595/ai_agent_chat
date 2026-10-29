@@ -485,6 +485,16 @@ provider's tool schema. See [AGENTS.md](AGENTS.md).
 Read [AGENTS.md](AGENTS.md). It has the repo map, the conventions
 that matter, and a list of traps that have already cost hours.
 
+## Releases
+
+| Version | Date | Highlights |
+|---|---|---|
+| [v0.11.0](https://github.com/DuNorth595/ai_agent_chat/releases/tag/v0.11.0) | 2026-10-27 | The voice-channel gateway, so the agent can be reached from a phone. The API-key lookup chain fixed, and the gateway test de-personalised. |
+| [v0.10.9](https://github.com/DuNorth595/ai_agent_chat/releases/tag/v0.10.9) | 2026-10-26 | The build channel stamped in the UI header. The two voices no longer talk over each other, the brain retries transient provider failures, and the bridge's memory retrieval works. |
+| [v0.10.8](https://github.com/DuNorth595/ai_agent_chat/releases/tag/v0.10.8) | 2026-10-26 | The phone-layout fixes: the top of the screen stays fixed, the input box sits above the keyboard, and the page no longer shakes on Send. |
+
+See [CHANGELOG.md](CHANGELOG.md) for the full history.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

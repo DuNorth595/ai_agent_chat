@@ -70,7 +70,7 @@ log = logging.getLogger("agent_voice_ai.bridge")
 # its port (8771) and by AVA_CHANNEL; the label is shown next to the
 # version in the top-right of the UI so it is always obvious which
 # build you are talking to.
-APP_VERSION = os.environ.get("AVA_VERSION", "0.10.8")
+APP_VERSION = os.environ.get("AVA_VERSION", "0.11.0")
 APP_CHANNEL = os.environ.get("AVA_CHANNEL", "prod").strip().lower()
 if APP_CHANNEL not in ("prod", "dev"):
     APP_CHANNEL = "prod"
